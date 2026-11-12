@@ -55,8 +55,9 @@ jobs:
       - name: Require the protected candidate ref and exact source SHA
         run: |
           set -euo pipefail
-          [[ "$GITHUB_REF" == 'refs/heads/release/rc-myteam-first-user' ]] || { echo 'Dispatch the candidate from release/rc-myteam-first-user.' >&2; exit 1; }
-          [[ "$REF_PROTECTED" == 'true' ]] || { echo 'The release candidate branch is not protected; no signing job will run.' >&2; exit 1; }
+          [[ "$GITHUB_REF" =~ ^refs/heads/release/[^/]+$ ]] || { echo 'Dispatch from a release/<name> branch with a non-empty, single-segment valid Git branch name.' >&2; exit 1; }
+          git check-ref-format "$GITHUB_REF" || { echo 'The release branch ref is invalid.' >&2; exit 1; }
+          [[ "$REF_PROTECTED" == 'true' ]] || { echo 'The selected release branch is not protected; no signing job will run.' >&2; exit 1; }
           [[ "$ACKNOWLEDGE_UNSIGNED_WINDOWS" == 'true' ]] || { echo 'Explicit acknowledgement of the unsigned Windows SmartScreen risk is required.' >&2; exit 1; }
           [[ "$EXPECTED_COMMIT_SHA" =~ ^[0-9a-f]{40}$ && "$EXPECTED_COMMIT_SHA" == "$GITHUB_SHA" ]] || { echo 'expected_commit_sha must equal the full SHA of the dispatched ref.' >&2; exit 1; }
           [[ "$RELEASE_VERSION_NAME" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo 'version_name must be numeric X.Y.Z.' >&2; exit 1; }
