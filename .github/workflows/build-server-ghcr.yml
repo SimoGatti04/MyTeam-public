@@ -1,0 +1,62 @@
+name: Build MyTeam server GHCR image
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_image:
+        description: Publish the container image from a protected ref
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/myteam-server
+
+jobs:
+  build:
+    if: inputs.publish_image == true && github.ref_protected
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image tags
+        id: meta
+        shell: bash
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          date_tag="$(date -u +%Y%m%d)"
+          immutable_tag="${date_tag}-${short_sha}"
+          {
+            echo "immutable_tag=${immutable_tag}"
+            echo "tags<<EOF"
+            echo "${IMAGE_NAME}:${immutable_tag}"
+            echo "${IMAGE_NAME}:prod"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./server
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}

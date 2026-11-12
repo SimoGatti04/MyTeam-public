@@ -1,0 +1,177 @@
+# Flutter
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.flutter-plugins-dependencies *
+.packages
+.pub-cache/
+.pub/
+/build/
+.metadata
+flutter_*.png
+linked_*.ds
+unlinked.ds
+unlinked_spec.ds
+*.g.dart
+*.freezed.dart
+
+# FVM (Flutter Version Management)
+.fvm/
+
+# Android
+**/android/**/gradle-wrapper.jar
+**/android/.gradle
+**/android/captures/
+**/android/gradlew
+**/android/gradlew.bat
+**/android/local.properties
+**/android/**/GeneratedPluginRegistrant.java
+**/android/key.properties
+*.jks
+*.keystore
+**/android/app/debug
+**/android/app/profile
+**/android/app/release
+
+# iOS
+**/ios/Pods/
+**/ios/.symlinks/
+**/ios/Flutter/App.framework
+**/ios/Flutter/Flutter.framework
+**/ios/Flutter/Flutter.podspec
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/ephemeral/
+**/ios/Flutter/app.flx
+**/ios/Flutter/app.zip
+**/ios/Flutter/flutter_assets/
+**/ios/ServiceDefinitions.json
+**/ios/Runner/GeneratedPluginRegistrant.*
+
+# Windows
+**/windows/flutter/generated_plugin_registrant.cc
+**/windows/flutter/generated_plugin_registrant.h
+**/windows/flutter/generated_plugins.cmake
+
+# macOS
+**/macos/Flutter/GeneratedPluginRegistrant.swift
+**/macos/Flutter/ephemeral
+**/macos/Pods/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+.venv
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Server
+server/videos.db
+server/videos.db-journal
+server/storage/
+server/.env
+server/.env.local
+server/.env.*.local
+server/logs/
+server/*.log
+
+# Environment files
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+
+# Testing
+test/.test_coverage/
+coverage/
+*.lcov
+
+# Analysis
+*.log
+*.tmp
+*.temp
+*.bak
+*.backup
+*.swp
+*.swo
+
+# Build artifacts
+*.apk
+*.aab
+*.ipa
+*.app
+*.dSYM.zip
+*.dSYM
+
+# Certificates and keys
+*.pem
+*.key
+*.crt
+*.cert
+*.p12
+*.pfx
+
+# Backup files
+*.backup
+*.old
+*~
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+
+
+# Updater signing private keys
+.ed25519_private.key
+*.key
+
+# Restricted local operator/audit notes and worktrees; never publish or package.
+.private/
+.worktrees/
+
+# Environment variants (keep documented templates only).
+.env.*
+!.env.example
+**/.env.*
+!**/.env.example

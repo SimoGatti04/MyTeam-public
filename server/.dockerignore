@@ -1,0 +1,54 @@
+# ─── Ambienti virtuali ───
+venv/
+.venv/
+env/
+
+# ─── Cache Python ───
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# ─── Runtime data (never send bind-mounted data to the build context) ───
+data/
+storage/
+logs/
+**/*.db
+**/*.db-*
+
+# ─── Config runtime ───
+.env
+.env.*
+!.env.example
+
+# ─── PM2 / Node (non serve in Docker) ───
+ecosystem.config.cjs
+node_modules/
+
+# ─── Test ───
+tests/
+pytest.ini
+.pytest_cache/
+htmlcov/
+.coverage
+
+# ─── macOS ───
+.DS_Store
+**/.DS_Store
+
+# ─── Git ───
+.git/
+.gitignore
+
+# ─── IDE ───
+.vscode/
+.idea/
+
+# ─── Migrations locali / script one-shot ───
+migrations/
+scripts/
+
+# ─── Documentazione ───
+README.md
+docs/

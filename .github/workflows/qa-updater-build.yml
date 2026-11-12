@@ -1,0 +1,245 @@
+name: QA updater A-B packages (manual only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_a_name:
+        description: Version name for QA build A (numeric major.minor.patch)
+        required: true
+        type: string
+        default: '0.2.1'
+      version_a_code:
+        description: Version code for QA build A (must exceed pubspec build number)
+        required: true
+        type: string
+        default: '3'
+      version_b_name:
+        description: Version name for QA build B (numeric major.minor.patch)
+        required: true
+        type: string
+        default: '0.2.2'
+      version_b_code:
+        description: Version code for QA build B (must exceed A)
+        required: true
+        type: string
+        default: '4'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qa-updater-ab-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  android:
+    if: github.ref == 'refs/heads/feat/client-c1-c2-updater'
+    runs-on: ubuntu-latest
+    env:
+      MYTEAM_ANDROID_SIGNING_CHANNEL: qa
+      QA_VERSION_A_NAME: ${{ inputs.version_a_name }}
+      QA_VERSION_A_CODE: ${{ inputs.version_a_code }}
+      QA_VERSION_B_NAME: ${{ inputs.version_b_name }}
+      QA_VERSION_B_CODE: ${{ inputs.version_b_code }}
+      MYTEAM_UPDATER_QA_PUBLIC_KEY_HEX: ${{ vars.MYTEAM_UPDATER_QA_PUBLIC_KEY_HEX }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.1'
+          channel: stable
+          cache: true
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'build-tools;35.0.0'
+
+      - name: Resolve locked dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Validate QA key and A-to-B version progression
+        shell: bash
+        run: >-
+          dart run tool/validate_qa_updater_build.dart
+          "$MYTEAM_UPDATER_QA_PUBLIC_KEY_HEX"
+          "$QA_VERSION_A_NAME" "$QA_VERSION_A_CODE"
+          "$QA_VERSION_B_NAME" "$QA_VERSION_B_CODE"
+
+      - name: Install external QA Android keystore
+        shell: bash
+        env:
+          ANDROID_QA_KEYSTORE_BASE64: ${{ secrets.ANDROID_QA_KEYSTORE_BASE64 }}
+          MYTEAM_ANDROID_QA_STORE_PASSWORD: ${{ secrets.ANDROID_QA_STORE_PASSWORD }}
+          MYTEAM_ANDROID_QA_KEY_ALIAS: ${{ secrets.ANDROID_QA_KEY_ALIAS }}
+          MYTEAM_ANDROID_QA_KEY_PASSWORD: ${{ secrets.ANDROID_QA_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$ANDROID_QA_KEYSTORE_BASE64" || -z "$MYTEAM_ANDROID_QA_STORE_PASSWORD" || -z "$MYTEAM_ANDROID_QA_KEY_ALIAS" || -z "$MYTEAM_ANDROID_QA_KEY_PASSWORD" ]]; then
+            echo "Required Android QA signing secrets are missing from repository Actions secrets." >&2
+            exit 1
+          fi
+          key_path="$RUNNER_TEMP/myteam-qa-release.jks"
+          umask 077
+          printf '%s' "$ANDROID_QA_KEYSTORE_BASE64" | base64 --decode > "$key_path"
+          chmod 600 "$key_path"
+          test -s "$key_path"
+          export MYTEAM_ANDROID_QA_KEYSTORE_PATH="$key_path"
+          keytool -list -keystore "$key_path" -storepass:env MYTEAM_ANDROID_QA_STORE_PASSWORD -alias "$MYTEAM_ANDROID_QA_KEY_ALIAS" >/dev/null
+          echo "MYTEAM_ANDROID_QA_KEYSTORE_PATH=$key_path" >> "$GITHUB_ENV"
+          echo "MYTEAM_QA_ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-$ANDROID_HOME}" >> "$GITHUB_ENV"
+
+      - name: Build and verify Android A and B
+        shell: bash
+        env:
+          MYTEAM_ANDROID_QA_STORE_PASSWORD: ${{ secrets.ANDROID_QA_STORE_PASSWORD }}
+          MYTEAM_ANDROID_QA_KEY_ALIAS: ${{ secrets.ANDROID_QA_KEY_ALIAS }}
+          MYTEAM_ANDROID_QA_KEY_PASSWORD: ${{ secrets.ANDROID_QA_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/android
+          build_apk() {
+            local label="$1" name="$2" code="$3"
+            flutter build apk --release \
+              --build-name="$name" --build-number="$code" \
+              --dart-define=MYTEAM_UPDATER_QA=true \
+              --dart-define="MYTEAM_UPDATER_QA_PUBLIC_KEY_HEX=$MYTEAM_UPDATER_QA_PUBLIC_KEY_HEX"
+            local output="build/app/outputs/flutter-apk/app-release.apk"
+            local target="artifacts/android/MyTeam-$label-$name+$code.apk"
+            test -s "$output"
+            cp "$output" "$target"
+            "$MYTEAM_QA_ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner" verify --print-certs "$target" > "$RUNNER_TEMP/$label-cert.txt"
+            "$MYTEAM_QA_ANDROID_SDK_ROOT/build-tools/35.0.0/aapt" dump badging "$target" | \
+              grep -F "name='com.example.myteam_video_app' versionCode='$code' versionName='$name'" >/dev/null
+            local fingerprint
+            fingerprint="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/$label-cert.txt" | head -1)"
+            test -n "$fingerprint"
+            printf '%s %s\n' "$label" "$fingerprint" >> artifacts/android/signing-fingerprints.txt
+            shasum -a 256 "$target" >> artifacts/android/SHA256SUMS
+          }
+          build_apk A "$QA_VERSION_A_NAME" "$QA_VERSION_A_CODE"
+          build_apk B "$QA_VERSION_B_NAME" "$QA_VERSION_B_CODE"
+          a_fingerprint="$(awk '$1 == "A" {print $2}' artifacts/android/signing-fingerprints.txt)"
+          b_fingerprint="$(awk '$1 == "B" {print $2}' artifacts/android/signing-fingerprints.txt)"
+          test "$a_fingerprint" = "$b_fingerprint"
+          echo "A and B share the same Android signing certificate."
+
+      - name: Upload Android QA packages (no feed publish)
+        uses: actions/upload-artifact@v4
+        with:
+          name: myteam-qa-android-ab-${{ inputs.version_a_code }}-${{ inputs.version_b_code }}
+          path: artifacts/android/
+          retention-days: 7
+
+      - name: Remove temporary Android keystore
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/myteam-qa-release.jks"
+
+  windows:
+    if: github.ref == 'refs/heads/feat/client-c1-c2-updater'
+    runs-on: windows-2022
+    env:
+      QA_VERSION_A_NAME: ${{ inputs.version_a_name }}
+      QA_VERSION_A_CODE: ${{ inputs.version_a_code }}
+      QA_VERSION_B_NAME: ${{ inputs.version_b_name }}
+      QA_VERSION_B_CODE: ${{ inputs.version_b_code }}
+      MYTEAM_UPDATER_QA_PUBLIC_KEY_HEX: ${{ vars.MYTEAM_UPDATER_QA_PUBLIC_KEY_HEX }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.1'
+          channel: stable
+          cache: true
+
+      - name: Resolve locked dependencies
+        run: flutter pub get --enforce-lockfile
+
+      - name: Validate QA key and A-to-B version progression
+        shell: pwsh
+        run: >-
+          dart run tool/validate_qa_updater_build.dart
+          $env:MYTEAM_UPDATER_QA_PUBLIC_KEY_HEX
+          $env:QA_VERSION_A_NAME $env:QA_VERSION_A_CODE
+          $env:QA_VERSION_B_NAME $env:QA_VERSION_B_CODE
+
+      - name: Locate and verify Inno Setup compiler
+        id: inno
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          )
+          $compiler = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $compiler) { throw 'ISCC.exe is required; refusing to substitute a different packager.' }
+          $probeScript = @'
+          [Setup]
+          AppId=MyTeamInnoCompilerProbe
+          AppName=MyTeam Inno Compiler Probe
+          AppVersion=1.0
+          DefaultDirName={tmp}
+          '@
+          $probeOutput = @($probeScript | & $compiler /O- - 2>&1)
+          $probeExitCode = $LASTEXITCODE
+          $probeText = ($probeOutput | ForEach-Object { $_.ToString() }) -join "`n"
+          if ($probeExitCode -ne 0) { throw "Inno Setup compiler smoke compile failed (exit $probeExitCode)." }
+          $versionLine = [string]($probeText -split "`n" | Where-Object { $_ -match '^Compiler engine version:' } | Select-Object -First 1)
+          $versionLine = $versionLine.Trim()
+          if ($versionLine -notmatch '^Compiler engine version: .*\s6\.7\.1$') { throw "Expected pinned Inno Setup compiler engine 6.7.1; found: $versionLine" }
+          "path=$compiler" >> $env:GITHUB_OUTPUT
+          "Verified $versionLine."
+
+      - name: Build and package Windows A and B
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $names = @($env:QA_VERSION_A_NAME, $env:QA_VERSION_B_NAME)
+          $codes = @($env:QA_VERSION_A_CODE, $env:QA_VERSION_B_CODE)
+          $labels = @('A', 'B')
+          $outputRoot = Join-Path $PWD 'artifacts\windows'
+          New-Item -ItemType Directory -Force -Path $outputRoot | Out-Null
+          $iscc = '${{ steps.inno.outputs.path }}'
+
+          for ($i = 0; $i -lt 2; $i++) {
+            $name = $names[$i]
+            $code = $codes[$i]
+            $label = $labels[$i]
+            flutter build windows --release --build-name=$name --build-number=$code `
+              --dart-define=MYTEAM_UPDATER_QA=true `
+              "--dart-define=MYTEAM_UPDATER_QA_PUBLIC_KEY_HEX=$env:MYTEAM_UPDATER_QA_PUBLIC_KEY_HEX"
+            if ($LASTEXITCODE -ne 0) { throw "Flutter Windows build $label failed." }
+
+            $releaseDir = Join-Path $PWD 'build\windows\x64\runner\Release'
+            foreach ($required in @('myteam.exe', 'flutter_windows.dll', 'data\flutter_assets', 'data\icudtl.dat', 'data\app.so')) {
+              if (-not (Test-Path (Join-Path $releaseDir $required))) { throw "Flutter release bundle missing $required." }
+            }
+            $installDir = Join-Path $outputRoot $label
+            New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+            Push-Location windows\installer
+            try {
+              & $iscc "/DMyAppVersion=`"$name`"" "/DMyAppBuildNumber=$code" "/O$installDir" "/FMyTeam-Setup-$name-$code" 'MyTeam-Setup.iss'
+              if ($LASTEXITCODE -ne 0) { throw "Inno Setup packaging $label failed." }
+            } finally {
+              Pop-Location
+            }
+            $setup = Join-Path $installDir "MyTeam-Setup-$name-$code.exe"
+            if (-not (Test-Path $setup)) { throw "Expected setup package not produced: $setup" }
+          }
+          Get-ChildItem $outputRoot -Filter '*.exe' -Recurse | Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash)  $([IO.Path]::GetRelativePath($outputRoot, $_.Path))" } |
+            Set-Content -Encoding ascii (Join-Path $outputRoot 'SHA256SUMS.txt')
+
+      - name: Upload Windows QA installers (no feed publish)
+        uses: actions/upload-artifact@v4
+        with:
+          name: myteam-qa-windows-ab-${{ inputs.version_a_code }}-${{ inputs.version_b_code }}
+          path: artifacts/windows/
+          retention-days: 7

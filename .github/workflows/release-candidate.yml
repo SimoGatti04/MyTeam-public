@@ -1,0 +1,345 @@
+name: Production release candidate (manual, no publication)
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_commit_sha:
+        description: Full immutable Git commit SHA approved for candidate build
+        required: true
+        type: string
+      version_name:
+        description: Numeric release version X.Y.Z
+        required: true
+        type: string
+      version_code:
+        description: Android versionCode, strictly greater than previous_production_version_code
+        required: true
+        type: string
+      previous_production_version_code:
+        description: Last promoted production versionCode; use 0 only for the first production release
+        required: true
+        type: string
+        default: '0'
+      changelog:
+        description: User-facing release notes included in the signed manifest
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: production-release-candidate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    env:
+      EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
+      RELEASE_VERSION_NAME: ${{ inputs.version_name }}
+      RELEASE_VERSION_CODE: ${{ inputs.version_code }}
+      PREVIOUS_PRODUCTION_VERSION_CODE: ${{ inputs.previous_production_version_code }}
+      REF_PROTECTED: ${{ github.ref_protected }}
+    steps:
+      - name: Require the protected candidate ref and exact source SHA
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == 'refs/heads/release/rc-myteam-first-user' ]] || { echo 'Dispatch the candidate from release/rc-myteam-first-user.' >&2; exit 1; }
+          [[ "$REF_PROTECTED" == 'true' ]] || { echo 'The release candidate branch is not protected; no signing job will run.' >&2; exit 1; }
+          [[ "$EXPECTED_COMMIT_SHA" =~ ^[0-9a-f]{40}$ && "$EXPECTED_COMMIT_SHA" == "$GITHUB_SHA" ]] || { echo 'expected_commit_sha must equal the full SHA of the dispatched ref.' >&2; exit 1; }
+          [[ "$RELEASE_VERSION_NAME" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo 'version_name must be numeric X.Y.Z.' >&2; exit 1; }
+          [[ "$RELEASE_VERSION_CODE" =~ ^[1-9][0-9]{0,9}$ && "$PREVIOUS_PRODUCTION_VERSION_CODE" =~ ^(0|[1-9][0-9]{0,9})$ ]] || { echo 'Version codes must be non-negative decimal integers.' >&2; exit 1; }
+          (( RELEASE_VERSION_CODE <= 2147483647 && PREVIOUS_PRODUCTION_VERSION_CODE <= 2147483647 && RELEASE_VERSION_CODE > PREVIOUS_PRODUCTION_VERSION_CODE )) || { echo 'Version codes must fit the Android positive 32-bit range and version_code must exceed the previous code.' >&2; exit 1; }
+
+  android:
+    needs: preflight
+    runs-on: ubuntu-24.04
+    environment: production-release
+    env:
+      MYTEAM_ANDROID_SIGNING_CHANNEL: production
+      EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
+      RELEASE_VERSION_NAME: ${{ inputs.version_name }}
+      RELEASE_VERSION_CODE: ${{ inputs.version_code }}
+      PREVIOUS_PRODUCTION_VERSION_CODE: ${{ inputs.previous_production_version_code }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6, GitHub-verified commit
+        with:
+          ref: ${{ inputs.expected_commit_sha }}
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5, GitHub-verified commit
+        with:
+          distribution: zulu
+          java-version: '17'
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2, GitHub-verified commit
+        with:
+          flutter-version: '3.38.1'
+          channel: stable
+          cache: true
+      - name: Install pinned Android build tools
+        run: |
+          set -euo pipefail
+          : "${ANDROID_HOME:?GitHub Ubuntu image must expose ANDROID_HOME}"
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [[ -x "$sdkmanager" ]] || { echo 'Pinned Android SDK command-line tools are missing.' >&2; exit 1; }
+          "$sdkmanager" --sdk_root="$ANDROID_HOME" --install 'build-tools;35.0.0'
+          test -x "$ANDROID_HOME/build-tools/35.0.0/aapt"
+      - name: Require production signer inputs
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_PROD_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_PROD_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_PROD_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_PROD_KEY_PASSWORD }}
+          PROD_CERT_SHA256: ${{ secrets.ANDROID_PROD_CERT_SHA256 }}
+          QA_CERT_SHA256: ${{ secrets.ANDROID_QA_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          for name in KEYSTORE_BASE64 STORE_PASSWORD KEY_ALIAS KEY_PASSWORD PROD_CERT_SHA256 QA_CERT_SHA256; do
+            if [[ -z "${!name}" ]]; then echo "Missing required production signing input: $name" >&2; exit 1; fi
+          done
+          if [[ "${PROD_CERT_SHA256,,}" == "${QA_CERT_SHA256,,}" ]]; then
+            echo 'Production and QA signing fingerprints must be distinct.' >&2; exit 1
+          fi
+      - name: Resolve immutable dependency lock
+        run: flutter pub get --enforce-lockfile
+      - name: Validate immutable source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_COMMIT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_COMMIT_SHA" == "$GITHUB_SHA" ]]
+      - name: Validate monotonic production version
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_VERSION_NAME" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$RELEASE_VERSION_CODE" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PREVIOUS_PRODUCTION_VERSION_CODE" =~ ^[0-9]+$ ]]
+          (( RELEASE_VERSION_CODE > PREVIOUS_PRODUCTION_VERSION_CODE ))
+          (( RELEASE_VERSION_CODE <= 2147483647 ))
+      - name: Install external production keystore
+        shell: bash
+        env:
+          ANDROID_PROD_KEYSTORE_BASE64: ${{ secrets.ANDROID_PROD_KEYSTORE_BASE64 }}
+          MYTEAM_ANDROID_PROD_STORE_PASSWORD: ${{ secrets.ANDROID_PROD_STORE_PASSWORD }}
+          MYTEAM_ANDROID_PROD_KEY_ALIAS: ${{ secrets.ANDROID_PROD_KEY_ALIAS }}
+          MYTEAM_ANDROID_PROD_KEY_PASSWORD: ${{ secrets.ANDROID_PROD_KEY_PASSWORD }}
+          MYTEAM_ANDROID_PROD_CERT_SHA256: ${{ secrets.ANDROID_PROD_CERT_SHA256 }}
+          MYTEAM_ANDROID_QA_CERT_SHA256: ${{ secrets.ANDROID_QA_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/myteam-production-release.jks"
+          printf '%s' "$ANDROID_PROD_KEYSTORE_BASE64" | base64 --decode > "$key_path"
+          chmod 600 "$key_path"
+          test -s "$key_path"
+          export MYTEAM_ANDROID_PROD_KEYSTORE_PATH="$key_path"
+          keytool -list -keystore "$key_path" -storepass:env MYTEAM_ANDROID_PROD_STORE_PASSWORD -alias "$MYTEAM_ANDROID_PROD_KEY_ALIAS" >/dev/null
+          echo "MYTEAM_ANDROID_PROD_KEYSTORE_PATH=$key_path" >> "$GITHUB_ENV"
+      - name: Build and verify signed production APK
+        shell: bash
+        env:
+          MYTEAM_ANDROID_PROD_STORE_PASSWORD: ${{ secrets.ANDROID_PROD_STORE_PASSWORD }}
+          MYTEAM_ANDROID_PROD_KEY_ALIAS: ${{ secrets.ANDROID_PROD_KEY_ALIAS }}
+          MYTEAM_ANDROID_PROD_KEY_PASSWORD: ${{ secrets.ANDROID_PROD_KEY_PASSWORD }}
+          MYTEAM_ANDROID_PROD_CERT_SHA256: ${{ secrets.ANDROID_PROD_CERT_SHA256 }}
+          MYTEAM_ANDROID_QA_CERT_SHA256: ${{ secrets.ANDROID_QA_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          flutter build apk --release --build-name "$RELEASE_VERSION_NAME" --build-number "$RELEASE_VERSION_CODE"
+          apk=build/app/outputs/flutter-apk/app-release.apk
+          badging=$("$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk")
+          grep -F "package: name='it.simogatti.myteam'" <<<"$badging" >/dev/null
+          cert_line=$("$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs "$apk" | grep 'Signer #1 certificate SHA-256 digest:')
+          actual="${cert_line##*: }"
+          expected="${MYTEAM_ANDROID_PROD_CERT_SHA256//:/}"
+          [[ "${actual,,}" == "${expected,,}" ]]
+          mkdir -p "$RUNNER_TEMP/release-android"
+          cp "$apk" "$RUNNER_TEMP/release-android/MyTeam-$RELEASE_VERSION_NAME+$RELEASE_VERSION_CODE.apk"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4, GitHub-verified commit
+        with:
+          name: production-candidate-android
+          path: ${{ runner.temp }}/release-android/*.apk
+          if-no-files-found: error
+          retention-days: 90
+
+  windows:
+    needs: preflight
+    runs-on: windows-2022
+    environment: production-release
+    env:
+      EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
+      RELEASE_VERSION_NAME: ${{ inputs.version_name }}
+      RELEASE_VERSION_CODE: ${{ inputs.version_code }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6, GitHub-verified commit
+        with:
+          ref: ${{ inputs.expected_commit_sha }}
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2, GitHub-verified commit
+        with:
+          flutter-version: '3.38.1'
+          channel: stable
+          cache: true
+      - name: Require production Authenticode signer
+        shell: pwsh
+        env:
+          PFX_BASE64: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_PASSWORD }}
+          CERT_SHA256: ${{ secrets.WINDOWS_AUTHENTICODE_CERT_SHA256 }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PFX_BASE64) -or [string]::IsNullOrWhiteSpace($env:PFX_PASSWORD) -or [string]::IsNullOrWhiteSpace($env:CERT_SHA256)) {
+            throw 'Production Windows Authenticode certificate and expected SHA-256 fingerprint are required.'
+          }
+      - name: Resolve immutable dependency lock
+        run: flutter pub get --enforce-lockfile
+      - name: Validate immutable source commit
+        shell: pwsh
+        env:
+          EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
+        run: |
+          if ($env:EXPECTED_COMMIT_SHA -notmatch '^[0-9a-f]{40}$' -or $env:EXPECTED_COMMIT_SHA -ne $env:GITHUB_SHA) { throw 'Expected commit must equal the exact dispatched source SHA.' }
+      - name: Validate monotonic production version
+        shell: pwsh
+        env:
+          PREVIOUS_PRODUCTION_VERSION_CODE: ${{ inputs.previous_production_version_code }}
+        run: |
+          if ($env:RELEASE_VERSION_NAME -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') { throw 'Version must be numeric X.Y.Z.' }
+          $code = 0; $previous = 0
+          if (-not [int]::TryParse($env:RELEASE_VERSION_CODE, [ref]$code) -or $code -lt 1) { throw 'Invalid version code.' }
+          if (-not [int]::TryParse($env:PREVIOUS_PRODUCTION_VERSION_CODE, [ref]$previous) -or $previous -lt 0 -or $code -le $previous) { throw 'Version code must exceed previous production code.' }
+      - name: Locate and verify pinned Inno Setup
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          )
+          $compiler = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $compiler) { throw 'ISCC.exe is required; refusing to substitute a different packager.' }
+          $probe = @'
+          [Setup]
+          AppId=MyTeam-ISCC-Probe
+          AppName=MyTeam compiler probe
+          AppVersion=1.0.0
+          DefaultDirName={tmp}\MyTeamProbe
+          OutputBaseFilename=MyTeam-ISCC-Probe
+          '@
+          $output = $probe | & $compiler /O- - 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "ISCC smoke compile failed with exit code $LASTEXITCODE." }
+          $versionLine = ($output -split "`r?`n" | Where-Object { $_ -match '^Compiler engine version:' } | Select-Object -First 1).Trim()
+          if ($versionLine -notmatch '^Compiler engine version: .*\s6\.7\.1$') { throw "Expected pinned Inno Setup compiler engine 6.7.1; found: $versionLine" }
+          "ISCC_PATH=$compiler" >> $env:GITHUB_ENV
+      - name: Build, package, and Authenticode-sign Windows installer
+        shell: pwsh
+        env:
+          PFX_BASE64: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_BASE64 }}
+          PFX_PASSWORD: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_PASSWORD }}
+          EXPECTED_CERT_SHA256: ${{ secrets.WINDOWS_AUTHENTICODE_CERT_SHA256 }}
+          TIMESTAMP_URL: http://timestamp.digicert.com
+        run: |
+          flutter config --enable-windows-desktop
+          flutter build windows --release --build-name $env:RELEASE_VERSION_NAME --build-number $env:RELEASE_VERSION_CODE
+          $packageDir = Join-Path $env:RUNNER_TEMP 'release-windows'
+          New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
+          Push-Location windows/installer
+          try { & $env:ISCC_PATH "/DMyAppVersion=`"$env:RELEASE_VERSION_NAME`"" "/DMyAppBuildNumber=$env:RELEASE_VERSION_CODE" "/O$packageDir" "/FMyTeam-Setup-$env:RELEASE_VERSION_NAME-$env:RELEASE_VERSION_CODE" 'MyTeam-Setup.iss'; if ($LASTEXITCODE -ne 0) { throw 'ISCC packaging failed.' } }
+          finally { Pop-Location }
+          $installer = Join-Path $packageDir "MyTeam-Setup-$env:RELEASE_VERSION_NAME-$env:RELEASE_VERSION_CODE.exe"
+          if (-not (Test-Path -LiteralPath $installer)) { throw 'Expected installer output is missing.' }
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'myteam-authenticode.pfx'
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:PFX_BASE64))
+          $securePassword = ConvertTo-SecureString $env:PFX_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation 'Cert:\CurrentUser\My' -Password $securePassword
+          try {
+            $actual = [Convert]::ToHexString($cert.GetCertHash([Security.Cryptography.HashAlgorithmName]::SHA256)).ToLowerInvariant()
+            $expected = $env:EXPECTED_CERT_SHA256.Replace(':', '').ToLowerInvariant()
+            if ($actual -ne $expected) { throw 'Imported Authenticode certificate does not match the pinned SHA-256 fingerprint.' }
+            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+            if (-not $signtool) { throw 'Windows SDK signtool.exe is required.' }
+            & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint /s My /tr $env:TIMESTAMP_URL /td SHA256 $installer
+            if ($LASTEXITCODE -ne 0) { throw 'Authenticode signing failed.' }
+            & $signtool.FullName verify /pa /all $installer
+            if ($LASTEXITCODE -ne 0) { throw 'Authenticode verification failed.' }
+          } finally {
+            Remove-Item -LiteralPath $pfxPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path "Cert:\CurrentUser\My\$($cert.Thumbprint)" -Force -ErrorAction SilentlyContinue
+          }
+          Copy-Item -LiteralPath $installer -Destination $env:RUNNER_TEMP
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4, GitHub-verified commit
+        with:
+          name: production-candidate-windows
+          path: ${{ runner.temp }}/MyTeam-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 90
+
+  bundle:
+    needs: [preflight, android, windows]
+    runs-on: ubuntu-24.04
+    environment: production-release
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6, GitHub-verified commit
+        with:
+          ref: ${{ inputs.expected_commit_sha }}
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2, GitHub-verified commit
+        with:
+          flutter-version: '3.38.1'
+          channel: stable
+          cache: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4, GitHub-verified commit
+        with:
+          name: production-candidate-android
+          path: ${{ runner.temp }}/candidate-input
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4, GitHub-verified commit
+        with:
+          name: production-candidate-windows
+          path: ${{ runner.temp }}/candidate-input
+      - name: Prepare manifest and provenance from exact built bytes
+        shell: bash
+        env:
+          EXPECTED_COMMIT_SHA: ${{ inputs.expected_commit_sha }}
+          RELEASE_VERSION_NAME: ${{ inputs.version_name }}
+          RELEASE_VERSION_CODE: ${{ inputs.version_code }}
+          PREVIOUS_PRODUCTION_VERSION_CODE: ${{ inputs.previous_production_version_code }}
+          RELEASE_CHANGELOG: ${{ inputs.changelog }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/release-candidate"
+          dart run tool/release_candidate.dart prepare \
+            --out="$dir" \
+            --version-name="$RELEASE_VERSION_NAME" \
+            --version-code="$RELEASE_VERSION_CODE" \
+            --previous-version-code="$PREVIOUS_PRODUCTION_VERSION_CODE" \
+            --android-apk="$RUNNER_TEMP/candidate-input/MyTeam-$RELEASE_VERSION_NAME+$RELEASE_VERSION_CODE.apk" \
+            --windows-installer="$RUNNER_TEMP/candidate-input/MyTeam-Setup-$RELEASE_VERSION_NAME-$RELEASE_VERSION_CODE.exe" \
+            --commit="$EXPECTED_COMMIT_SHA" \
+            --workflow-run-id="$GITHUB_RUN_ID" \
+            --android-cert-sha256="${{ secrets.ANDROID_PROD_CERT_SHA256 }}" \
+            --windows-authenticode-sha256="${{ secrets.WINDOWS_AUTHENTICODE_CERT_SHA256 }}" \
+            --changelog="$RELEASE_CHANGELOG"
+      - name: Sign and verify production manifest
+        shell: bash
+        env:
+          MYTEAM_UPDATER_PRIVATE_KEY: ${{ secrets.MYTEAM_UPDATER_PROD_PRIVATE_KEY }}
+          EXPECTED_ANDROID_CERT: ${{ secrets.ANDROID_PROD_CERT_SHA256 }}
+          EXPECTED_WINDOWS_CERT: ${{ secrets.WINDOWS_AUTHENTICODE_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          test -n "$MYTEAM_UPDATER_PRIVATE_KEY"
+          dir="$RUNNER_TEMP/release-candidate"
+          dart run tool/sign_manifest.dart sign "$dir/version.json"
+          (cd "$dir" && sha256sum MyTeam-*.apk MyTeam-Setup-*.exe version.json version.json.sig build-provenance.json > SHA256SUMS)
+          dart run tool/release_candidate.dart validate "$dir"
+          tar -C "$dir" --sort=name --owner=0 --group=0 --numeric-owner -czf "$RUNNER_TEMP/myteam-production-candidate.tar.gz" .
+          (cd "$RUNNER_TEMP" && sha256sum myteam-production-candidate.tar.gz > myteam-production-candidate.tar.gz.sha256)
+          dart run tool/release_candidate.dart verify-archive "$RUNNER_TEMP/myteam-production-candidate.tar.gz" "$RUNNER_TEMP/myteam-production-candidate.tar.gz.sha256"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4, GitHub-verified commit
+        with:
+          name: myteam-production-release-candidate
+          path: |
+            ${{ runner.temp }}/myteam-production-candidate.tar.gz
+            ${{ runner.temp }}/myteam-production-candidate.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 90

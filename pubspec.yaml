@@ -1,0 +1,92 @@
+name: myteam
+description: Self-hosted video management app for Android and Windows
+publish_to: 'none'
+version: 0.2.0+2
+
+environment:
+  sdk: '>=3.10.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State Management
+  provider: ^6.1.1
+
+  # HTTP Client
+  dio: ^5.4.0
+  
+  # Archive (per estrazione ZIP FFmpeg)
+  archive: ^4.0.7
+
+  # File Selection
+  file_picker: ^10.3.6  # Updated from 10.3.3
+
+  # Video Metadata & Compression
+  # ffmpeg_kit_flutter è stato discontinuato (gennaio 2025)
+  # Usa ffmpeg_kit_flutter_new (fork mantenuto) - supporta Android e iOS con FFmpeg v6.0.2-LTS
+  # Per macOS: usa Xcode direttamente (vedi docs/APP/XCODE-BUILD.md)
+  ffmpeg_kit_flutter_new: ^4.1.0  # Updated from 2.0.0
+
+  # Cache Directory
+  path_provider: ^2.1.1
+
+  # Connectivity Check
+  connectivity_plus: ^7.0.0  # Updated from 5.0.2
+
+  # Video Player
+  video_player: ^2.9.5  # Compatibile con Dart 3.5.4+ (Flutter 3.24.x)
+  chewie: ^1.8.4  # Native video player controls
+  media_kit: ^1.1.10  # Video player per Windows/Linux/macOS con hardware acceleration
+  media_kit_video: ^2.0.0  # Video widget per media_kit
+  media_kit_libs_windows_video: ^1.0.8  # Librerie native Windows per media_kit
+
+  # Cryptographic verification & Package Info
+  crypto: ^3.0.3
+  package_info_plus: ^9.0.0
+
+  # Shared Preferences
+  shared_preferences: ^2.2.2
+
+  # UI Components
+  cupertino_icons: ^1.0.6
+  table_calendar: ^3.1.2
+  intl: ^0.20.2
+  ed25519_edwards: ^0.3.2
+  convert: ^3.1.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0  # Compatibile con Dart 3.8.0+ (Flutter 3.38.1 con Dart 3.10.0)
+  flutter_launcher_icons: ^0.14.4  
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/icon/
+    - assets/licenses/ffmpeg_kit_flutter_new/
+    - assets/licenses/media_kit_libs_windows_video/
+
+# Configurazione unificata nome e icona
+flutter_launcher_icons:
+  # Nome app (verrà applicato a tutte le piattaforme)
+  app_name: "MyTeam"  # Cambia questo con il tuo nome
+  
+  # Icone per tutte le piattaforme
+  android: true
+  macos:
+    generate: true
+  windows:
+    generate: true
+  
+  # Path alla tua icona
+  image_path: "assets/icon/icon.png"
+  
+  # Adaptive Icons (Android 8.0+)
+  adaptive_icon_background: "#FFFFFF"  # Colore sfondo
+  adaptive_icon_foreground: "assets/icon/icon.png"  # Icona foreground
+  
+  # macOS specific (opzionale)
+  macos_remove_alpha_icon: true
+

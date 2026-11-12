@@ -1,0 +1,35 @@
+services:
+  myteam-server:
+    image: ${MYTEAM_SERVER_IMAGE:-myteam-server:local}
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${MYTEAM_BIND_ADDRESS:-127.0.0.1}:${MYTEAM_HTTP_PORT:-8000}:8000"
+    volumes:
+      - "${MYTEAM_DATA_DIR:-./data}/videos.db:/app/videos.db"
+      - "${MYTEAM_DATA_DIR:-./data}/storage:/app/storage"
+      - "${MYTEAM_DATA_DIR:-./data}/logs:/app/logs"
+    environment:
+      SERVER_HOST: "${SERVER_HOST:-0.0.0.0}"
+      SERVER_PORT: "${SERVER_PORT:-8000}"
+      DEBUG: "${DEBUG:-false}"
+      DATABASE_URL: "${DATABASE_URL:-sqlite:///./videos.db}"
+      STORAGE_PATH: "/app/storage"
+      VIDEOS_PATH: "/app/storage/videos"
+      THUMBNAILS_PATH: "/app/storage/thumbnails"
+      QUALITIES_PATH: "/app/storage/qualities"
+      FFMPEG_PATH: "${FFMPEG_PATH:-ffmpeg}"
+      FFPROBE_PATH: "${FFPROBE_PATH:-ffprobe}"
+      MAX_UPLOAD_SIZE: "${MAX_UPLOAD_SIZE:-53687091200}"
+      MAX_CONCURRENT_UPLOADS: "${MAX_CONCURRENT_UPLOADS:-30}"
+      UPLOAD_TIMEOUT: "${UPLOAD_TIMEOUT:-86400}"
+      MAX_RETRIES_BACKGROUND_TASKS: "${MAX_RETRIES_BACKGROUND_TASKS:-5}"
+      METADATA_EXTRACTION_TIMEOUT: "${METADATA_EXTRACTION_TIMEOUT:-3600}"
+      THUMBNAIL_GENERATION_TIMEOUT: "${THUMBNAIL_GENERATION_TIMEOUT:-600}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-http://localhost:3000}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s

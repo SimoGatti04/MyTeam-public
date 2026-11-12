@@ -1,0 +1,251 @@
+name: Build Flutter App
+
+on:
+  # Trigger manuale (workflow_dispatch)
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Piattaforma da buildare'
+        required: true
+        type: choice
+        options:
+          - all
+          - windows
+          - android
+          - macos
+        default: 'all'
+      build_type:
+        description: 'Tipo di build'
+        required: true
+        type: choice
+        options:
+          - release
+          - debug
+        default: 'release'
+  
+  # Trigger automatico su push a main/master
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'lib/**'
+      - 'pubspec.yaml'
+      - '.github/workflows/build.yml'
+  
+  # Trigger automatico su pull request
+  pull_request:
+    branches:
+      - main
+      - master
+    paths:
+      - 'lib/**'
+      - 'pubspec.yaml'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build-windows:
+    name: Build Windows
+    runs-on: windows-2022
+    if: |
+      github.event_name == 'workflow_dispatch' && 
+      (github.event.inputs.platform == 'windows' || github.event.inputs.platform == 'all') ||
+      (github.event_name == 'push' || github.event_name == 'pull_request')
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Block unsigned Windows release builds
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release'
+        shell: pwsh
+        run: |
+          Write-Error "This generic workflow is CI-only. Windows production requires the approved Authenticode signing gate."
+          exit 1
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.1'
+          channel: 'stable'
+          cache: true
+      
+      - name: Enable Windows Desktop
+        run: flutter config --enable-windows-desktop
+      
+      - name: Create Windows project (if needed)
+        run: |
+          if (-not (Test-Path "windows")) {
+            # Verifica e corregge pubspec.yaml se necessario
+            $pubspecContent = Get-Content pubspec.yaml -Raw
+            if ($pubspecContent -notmatch "name:\s+myteam") {
+              $pubspecContent = $pubspecContent -replace "name:\s+\w+", "name: myteam"
+              Set-Content pubspec.yaml -Value $pubspecContent -NoNewline
+            }
+            # Usa --project-name per forzare il nome corretto
+            flutter create --platforms=windows --project-name myteam .
+          }
+        shell: pwsh
+      
+      - name: Install dependencies
+        run: flutter pub get
+      
+      - name: Verify Flutter setup
+        run: flutter doctor -v
+      
+      - name: Build Windows (Release)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release'
+        run: flutter build windows --release
+      
+      - name: Build Windows (Debug)
+        if: github.event.inputs.build_type == 'debug' || github.event_name != 'workflow_dispatch'
+        run: flutter build windows --debug
+      
+      - name: Upload Windows artifacts (Release)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: build/windows/x64/runner/Release/
+          retention-days: 30
+      
+      - name: Upload Windows artifacts (Debug)
+        if: github.event.inputs.build_type == 'debug' || github.event_name != 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-debug
+          path: build/windows/x64/runner/Debug/
+          retention-days: 30
+
+  build-android:
+    name: Build Android
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' && 
+      (github.event.inputs.platform == 'android' || github.event.inputs.platform == 'all')
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+      
+      - name: Block unapproved Android release builds
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release'
+        shell: bash
+        run: |
+          echo "This generic workflow is CI-only. Android production must use the separately approved production signing and fingerprint gate." >&2
+          exit 1
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.1'
+          channel: 'stable'
+          cache: true
+      
+      - name: Install dependencies
+        run: flutter pub get
+      
+      - name: Verify Flutter setup
+        run: flutter doctor -v
+      
+      - name: Build Android APK (Release)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release'
+        run: flutter build apk --release
+      
+      - name: Build Android APK (Debug)
+        if: github.event.inputs.build_type == 'debug' || github.event_name != 'workflow_dispatch'
+        run: flutter build apk --debug
+      
+      - name: Build Android AAB (Release)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release'
+        run: flutter build appbundle --release
+      
+      - name: Upload Android APK (Release)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk-release
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30
+      
+      - name: Upload Android APK (Debug)
+        if: github.event.inputs.build_type == 'debug' || github.event_name != 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk-debug
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          retention-days: 30
+      
+      - name: Upload Android AAB (Release)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-aab-release
+          path: build/app/outputs/bundle/release/app-release.aab
+          retention-days: 30
+
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    if: |
+      github.event_name == 'workflow_dispatch' && 
+      (github.event.inputs.platform == 'macos' || github.event.inputs.platform == 'all')
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.1'
+          channel: 'stable'
+          cache: true
+      
+      - name: Install CocoaPods
+        run: |
+          sudo gem install cocoapods
+          pod --version
+      
+      - name: Install dependencies
+        run: flutter pub get
+      
+      - name: Install CocoaPods dependencies
+        run: |
+          cd macos
+          pod install
+          cd ..
+      
+      - name: Verify Flutter setup
+        run: flutter doctor -v
+      
+      - name: Build macOS (Release)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release'
+        run: flutter build macos --release
+      
+      - name: Build macOS (Debug)
+        if: github.event.inputs.build_type == 'debug' || github.event_name != 'workflow_dispatch'
+        run: flutter build macos --debug
+      
+      - name: Upload macOS artifacts (Release)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.build_type == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-release
+          path: build/macos/Build/Products/Release/
+          retention-days: 30
+      
+      - name: Upload macOS artifacts (Debug)
+        if: github.event.inputs.build_type == 'debug' || github.event_name != 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-debug
+          path: build/macos/Build/Products/Debug/
+          retention-days: 30
+

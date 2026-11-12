@@ -1,0 +1,19 @@
+# Optional overlay for an existing PostgreSQL service named `myteam_postgres`.
+# Keep the password file outside this repository; do not commit it.
+services:
+  myteam-server:
+    environment:
+      DATABASE_URL: null
+    secrets:
+      - myteam_db_password
+    networks:
+      - backend
+
+secrets:
+  myteam_db_password:
+    file: ${MYTEAM_DB_PASSWORD_FILE:?Set MYTEAM_DB_PASSWORD_FILE to an external secret file}
+
+networks:
+  backend:
+    external: true
+    name: ${MYTEAM_BACKEND_NETWORK:?Set MYTEAM_BACKEND_NETWORK to the Docker network containing myteam_postgres}
