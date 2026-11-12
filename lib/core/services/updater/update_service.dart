@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -119,8 +120,12 @@ class UpdateService extends ChangeNotifier {
     notifyListeners();
   }
 
-  bool _isManifestRequest(Uri uri) =>
-      uri.path == '/updates/version.json' || _qaManifestPath.hasMatch(uri.path);
+  bool _isManifestRequest(Uri uri) {
+    final path = uri.path.endsWith('.sig')
+        ? uri.path.substring(0, uri.path.length - 4)
+        : uri.path;
+    return path == '/updates/version.json' || _qaManifestPath.hasMatch(path);
+  }
 
   String _friendlyCheckError(Object error) {
     if (_channelConfig.isQa && !_channelConfig.isValid) {
@@ -390,6 +395,11 @@ class UpdateService extends ChangeNotifier {
           DebugLogger.debug(
             'UpdateService: Detached .sig unavailable: ${_safeUpdateDiagnostic(e)}',
           );
+          if (e is DioException &&
+              (e.response?.statusCode == null ||
+                  e.response!.statusCode! >= HttpStatus.tooManyRequests)) {
+            rethrow;
+          }
         }
       }
 
@@ -430,6 +440,11 @@ class UpdateService extends ChangeNotifier {
         jsonData,
         detachedSignature: effectiveSignature,
       );
+      if (manifest.versionCode < currentVersionCode) {
+        throw const FormatException(
+          'Il manifest propone una versione precedente a quella installata.',
+        );
+      }
 
       // Risolvi l'artefatto specifico per la piattaforma in esecuzione
       String platformKey;
@@ -640,6 +655,11 @@ class UpdateService extends ChangeNotifier {
               type: DioExceptionType.cancel,
             );
           }
+          if (receivedBytes + chunk.length > artifact.sizeBytes) {
+            throw const FormatException(
+              'Dimensione scaricata superiore a quella dichiarata nel manifest.',
+            );
+          }
           fileSink.add(chunk);
           receivedBytes += chunk.length;
           final double progress = totalExpectedBytes > 0
@@ -658,6 +678,12 @@ class UpdateService extends ChangeNotifier {
       } finally {
         await fileSink.flush();
         await fileSink.close();
+      }
+
+      if (receivedBytes != artifact.sizeBytes) {
+        throw const FormatException(
+          'Dimensione scaricata diversa da quella dichiarata nel manifest.',
+        );
       }
 
       // Fase di verifica integrità crittografica SHA-256

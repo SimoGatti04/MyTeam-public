@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:convert/convert.dart';
+import 'package:crypto/crypto.dart';
 import 'package:ed25519_edwards/ed25519_edwards.dart' as ed;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:myteam/core/services/updater/models/update_manifest.dart';
@@ -129,6 +132,58 @@ void main() {
       expect(androidArtifact?.url, startsWith("https://myteam.simogatti.it"));
       expect(androidArtifact?.sizeBytes, equals(240000000));
       expect(androidArtifact?.sha256.length, equals(64));
+    });
+
+    test('rejects malformed hashes and non-positive or fractional sizes', () {
+      for (final size in <Object?>[0, -1, 1.5, '12', null]) {
+        expect(
+          () => UpdateManifest.fromJson({
+            'version_name': '1.0.1',
+            'version_code': 2,
+            'release_date': '2026-11-12',
+            'platforms': {
+              'android': {
+                'url': 'https://myteam.simogatti.it/updates/app.apk',
+                'sha256': 'a' * 64,
+                'size_bytes': size,
+              },
+            },
+          }),
+          throwsA(isA<FormatException>()),
+          reason: 'size_bytes=$size must be rejected',
+        );
+      }
+
+      expect(
+        () => UpdateManifest.fromJson({
+          'version_name': '1.0.1',
+          'version_code': 2,
+          'release_date': '2026-11-12',
+          'platforms': {
+            'android': {
+              'url': 'https://myteam.simogatti.it/updates/app.apk',
+              'sha256': 'z' * 64,
+              'size_bytes': 12,
+            },
+          },
+        }),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('rejects missing, non-positive, or fractional version codes', () {
+      for (final versionCode in <Object?>[0, -1, 1.5, '2', null]) {
+        expect(
+          () => UpdateManifest.fromJson({
+            'version_name': '1.0.1',
+            'version_code': versionCode,
+            'release_date': '2026-11-12',
+            'platforms': <String, dynamic>{},
+          }),
+          throwsA(isA<FormatException>()),
+          reason: 'version_code=$versionCode must be rejected',
+        );
+      }
     });
 
     test('Rejects non-HTTPS or untrusted artifact URLs for security', () {
@@ -903,6 +958,185 @@ void main() {
       }
     });
 
+    test('HTTP 503 while loading detached signature is transient', () async {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final keyPair = ed.generateKey();
+      final pubHex = hex.encode(keyPair.publicKey.bytes);
+      final manifestBytes = utf8.encode(
+        jsonEncode({
+          'version_name': '1.0.0',
+          'version_code': 1,
+          'release_date': '2026-11-12',
+          'platforms': {
+            for (final platform in ['android', 'windows', 'macos'])
+              platform: {
+                'url': 'https://myteam.simogatti.it/updates/current.bin',
+                'sha256': '0' * 64,
+                'size_bytes': 1,
+              },
+          },
+        }),
+      );
+      server.listen((request) async {
+        if (request.uri.path.endsWith('.sig')) {
+          request.response.statusCode = HttpStatus.serviceUnavailable;
+        } else {
+          request.response.add(manifestBytes);
+        }
+        await request.response.close();
+      });
+      CryptoVerifier.allowedEndpointOverrideForTesting = (uri) =>
+          uri.host == server.address.host && uri.port == server.port;
+      final service = UpdateService.createForTesting()
+        ..setManifestPublicKey(pubHex);
+
+      try {
+        expect(
+          await service.checkForUpdates(
+            customManifestUrl:
+                'http://${server.address.host}:${server.port}/updates/version.json',
+          ),
+          isFalse,
+        );
+        expect(service.state.status, UpdateStatus.failed);
+        expect(service.state.failureKind, UpdateFailureKind.serviceUnavailable);
+        expect(service.state.errorMessage, contains('HTTP 503'));
+      } finally {
+        service.dispose();
+        CryptoVerifier.allowedEndpointOverrideForTesting = null;
+        await server.close(force: true);
+      }
+    });
+
+    test('signed manifest cannot downgrade the installed version code', () async {
+      PackageInfo.setMockInitialValues(
+        appName: 'MyTeam',
+        packageName: 'it.simogatti.myteam',
+        version: '1.0.0',
+        buildNumber: '2',
+        buildSignature: '',
+      );
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final keyPair = ed.generateKey();
+      final pubHex = hex.encode(keyPair.publicKey.bytes);
+      final manifestBytes = utf8.encode(
+        jsonEncode({
+          'version_name': '0.9.0',
+          'version_code': 1,
+          'release_date': '2026-11-12',
+          'platforms': {
+            for (final platform in ['android', 'windows', 'macos'])
+              platform: {
+                'url': 'https://myteam.simogatti.it/updates/old.bin',
+                'sha256': '0' * 64,
+                'size_bytes': 1,
+              },
+          },
+        }),
+      );
+      final signature = hex.encode(ed.sign(keyPair.privateKey, manifestBytes));
+      server.listen((request) async {
+        if (request.uri.path.endsWith('.sig')) {
+          request.response.write(signature);
+        } else {
+          request.response.add(manifestBytes);
+        }
+        await request.response.close();
+      });
+      CryptoVerifier.allowedEndpointOverrideForTesting = (uri) =>
+          uri.host == server.address.host && uri.port == server.port;
+      final service = UpdateService.createForTesting()
+        ..setManifestPublicKey(pubHex);
+
+      try {
+        expect(
+          await service.checkForUpdates(
+            customManifestUrl:
+                'http://${server.address.host}:${server.port}/updates/version.json',
+          ),
+          isFalse,
+        );
+        expect(service.state.status, UpdateStatus.failed);
+        expect(service.state.failureKind, UpdateFailureKind.security);
+        expect(
+          service.state.errorMessage,
+          contains('Impossibile verificare gli aggiornamenti'),
+        );
+      } finally {
+        service.dispose();
+        CryptoVerifier.allowedEndpointOverrideForTesting = null;
+        await server.close(force: true);
+      }
+    });
+
+    for (final declaredSizeDelta in [-1, 1]) {
+      test(
+        'download rejects artifact size mismatch ($declaredSizeDelta)',
+        () async {
+          final payload = utf8.encode('verified update payload');
+          final filename =
+              'size-${DateTime.now().microsecondsSinceEpoch}-$declaredSizeDelta.apk';
+          final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+          final keyPair = ed.generateKey();
+          final pubHex = hex.encode(keyPair.publicKey.bytes);
+          final artifactUrl =
+              'http://${server.address.host}:${server.port}/updates/$filename';
+          final manifestBytes = utf8.encode(
+            jsonEncode({
+              'version_name': '1.0.1',
+              'version_code': 2,
+              'release_date': '2026-11-12',
+              'platforms': {
+                for (final platform in ['android', 'windows', 'macos'])
+                  platform: {
+                    'url': artifactUrl,
+                    'sha256': sha256.convert(payload).toString(),
+                    'size_bytes': payload.length + declaredSizeDelta,
+                  },
+              },
+            }),
+          );
+          final signature = hex.encode(
+            ed.sign(keyPair.privateKey, manifestBytes),
+          );
+          server.listen((request) async {
+            if (request.uri.path.endsWith('.sig')) {
+              request.response.write(signature);
+            } else if (request.uri.path.endsWith('version.json')) {
+              request.response.add(manifestBytes);
+            } else {
+              request.response.add(payload);
+            }
+            await request.response.close();
+          });
+          CryptoVerifier.allowedEndpointOverrideForTesting = (uri) =>
+              uri.host == server.address.host && uri.port == server.port;
+          final service = UpdateService.createForTesting()
+            ..setManifestPublicKey(pubHex);
+          final downloadedPath =
+              '${Directory.systemTemp.path}/myteam_updates/$filename';
+
+          try {
+            expect(
+              await service.checkForUpdates(
+                customManifestUrl:
+                    'http://${server.address.host}:${server.port}/updates/version.json',
+              ),
+              isTrue,
+            );
+            expect(await service.downloadUpdate(), isNull);
+            expect(service.state.status, UpdateStatus.failed);
+            expect(service.state.failureKind, UpdateFailureKind.security);
+            expect(await File(downloadedPath).exists(), isFalse);
+          } finally {
+            service.dispose();
+            CryptoVerifier.allowedEndpointOverrideForTesting = null;
+            await server.close(force: true);
+          }
+        },
+      );
+    }
+
     test(
       'missing detached signature stays a strict verification failure',
       () async {
@@ -1033,7 +1267,7 @@ void main() {
                   'http://${finalServer.address.host}:${finalServer.port}/app.bin',
               'sha256':
                   'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-              'size_bytes': 0,
+              'size_bytes': 1,
             },
           },
         });
@@ -1116,7 +1350,7 @@ void main() {
                 'url': 'http://${origin.address.host}:${origin.port}/artifact',
                 'sha256':
                     'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-                'size_bytes': 0,
+                'size_bytes': 1,
               },
             },
           }),

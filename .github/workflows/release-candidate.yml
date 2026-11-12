@@ -24,6 +24,11 @@ on:
         description: User-facing release notes included in the signed manifest
         required: true
         type: string
+      acknowledge_unsigned_windows:
+        description: Acknowledge that the Windows installer is intentionally unsigned and may trigger SmartScreen warnings
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -45,12 +50,14 @@ jobs:
       RELEASE_VERSION_CODE: ${{ inputs.version_code }}
       PREVIOUS_PRODUCTION_VERSION_CODE: ${{ inputs.previous_production_version_code }}
       REF_PROTECTED: ${{ github.ref_protected }}
+      ACKNOWLEDGE_UNSIGNED_WINDOWS: ${{ inputs.acknowledge_unsigned_windows }}
     steps:
       - name: Require the protected candidate ref and exact source SHA
         run: |
           set -euo pipefail
           [[ "$GITHUB_REF" == 'refs/heads/release/rc-myteam-first-user' ]] || { echo 'Dispatch the candidate from release/rc-myteam-first-user.' >&2; exit 1; }
           [[ "$REF_PROTECTED" == 'true' ]] || { echo 'The release candidate branch is not protected; no signing job will run.' >&2; exit 1; }
+          [[ "$ACKNOWLEDGE_UNSIGNED_WINDOWS" == 'true' ]] || { echo 'Explicit acknowledgement of the unsigned Windows SmartScreen risk is required.' >&2; exit 1; }
           [[ "$EXPECTED_COMMIT_SHA" =~ ^[0-9a-f]{40}$ && "$EXPECTED_COMMIT_SHA" == "$GITHUB_SHA" ]] || { echo 'expected_commit_sha must equal the full SHA of the dispatched ref.' >&2; exit 1; }
           [[ "$RELEASE_VERSION_NAME" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo 'version_name must be numeric X.Y.Z.' >&2; exit 1; }
           [[ "$RELEASE_VERSION_CODE" =~ ^[1-9][0-9]{0,9}$ && "$PREVIOUS_PRODUCTION_VERSION_CODE" =~ ^(0|[1-9][0-9]{0,9})$ ]] || { echo 'Version codes must be non-negative decimal integers.' >&2; exit 1; }
@@ -183,16 +190,6 @@ jobs:
           flutter-version: '3.38.1'
           channel: stable
           cache: true
-      - name: Require production Authenticode signer
-        shell: pwsh
-        env:
-          PFX_BASE64: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_BASE64 }}
-          PFX_PASSWORD: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_PASSWORD }}
-          CERT_SHA256: ${{ secrets.WINDOWS_AUTHENTICODE_CERT_SHA256 }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:PFX_BASE64) -or [string]::IsNullOrWhiteSpace($env:PFX_PASSWORD) -or [string]::IsNullOrWhiteSpace($env:CERT_SHA256)) {
-            throw 'Production Windows Authenticode certificate and expected SHA-256 fingerprint are required.'
-          }
       - name: Resolve immutable dependency lock
         run: flutter pub get --enforce-lockfile
       - name: Validate immutable source commit
@@ -232,13 +229,8 @@ jobs:
           $versionLine = ($output -split "`r?`n" | Where-Object { $_ -match '^Compiler engine version:' } | Select-Object -First 1).Trim()
           if ($versionLine -notmatch '^Compiler engine version: .*\s6\.7\.1$') { throw "Expected pinned Inno Setup compiler engine 6.7.1; found: $versionLine" }
           "ISCC_PATH=$compiler" >> $env:GITHUB_ENV
-      - name: Build, package, and Authenticode-sign Windows installer
+      - name: Build and package intentionally unsigned Windows installer
         shell: pwsh
-        env:
-          PFX_BASE64: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_BASE64 }}
-          PFX_PASSWORD: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_PASSWORD }}
-          EXPECTED_CERT_SHA256: ${{ secrets.WINDOWS_AUTHENTICODE_CERT_SHA256 }}
-          TIMESTAMP_URL: http://timestamp.digicert.com
         run: |
           flutter config --enable-windows-desktop
           flutter build windows --release --build-name $env:RELEASE_VERSION_NAME --build-number $env:RELEASE_VERSION_CODE
@@ -249,24 +241,8 @@ jobs:
           finally { Pop-Location }
           $installer = Join-Path $packageDir "MyTeam-Setup-$env:RELEASE_VERSION_NAME-$env:RELEASE_VERSION_CODE.exe"
           if (-not (Test-Path -LiteralPath $installer)) { throw 'Expected installer output is missing.' }
-          $pfxPath = Join-Path $env:RUNNER_TEMP 'myteam-authenticode.pfx'
-          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:PFX_BASE64))
-          $securePassword = ConvertTo-SecureString $env:PFX_PASSWORD -AsPlainText -Force
-          $cert = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation 'Cert:\CurrentUser\My' -Password $securePassword
-          try {
-            $actual = [Convert]::ToHexString($cert.GetCertHash([Security.Cryptography.HashAlgorithmName]::SHA256)).ToLowerInvariant()
-            $expected = $env:EXPECTED_CERT_SHA256.Replace(':', '').ToLowerInvariant()
-            if ($actual -ne $expected) { throw 'Imported Authenticode certificate does not match the pinned SHA-256 fingerprint.' }
-            $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
-            if (-not $signtool) { throw 'Windows SDK signtool.exe is required.' }
-            & $signtool.FullName sign /fd SHA256 /sha1 $cert.Thumbprint /s My /tr $env:TIMESTAMP_URL /td SHA256 $installer
-            if ($LASTEXITCODE -ne 0) { throw 'Authenticode signing failed.' }
-            & $signtool.FullName verify /pa /all $installer
-            if ($LASTEXITCODE -ne 0) { throw 'Authenticode verification failed.' }
-          } finally {
-            Remove-Item -LiteralPath $pfxPath -Force -ErrorAction SilentlyContinue
-            Remove-Item -Path "Cert:\CurrentUser\My\$($cert.Thumbprint)" -Force -ErrorAction SilentlyContinue
-          }
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          if ($signature.Status -ne 'NotSigned') { throw 'Expected the owner-approved unsigned installer; unexpected Authenticode status.' }
           Copy-Item -LiteralPath $installer -Destination $env:RUNNER_TEMP
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4, GitHub-verified commit
         with:
@@ -317,14 +293,13 @@ jobs:
             --commit="$EXPECTED_COMMIT_SHA" \
             --workflow-run-id="$GITHUB_RUN_ID" \
             --android-cert-sha256="${{ secrets.ANDROID_PROD_CERT_SHA256 }}" \
-            --windows-authenticode-sha256="${{ secrets.WINDOWS_AUTHENTICODE_CERT_SHA256 }}" \
+            --windows-authenticode-status=unsigned_owner_accepted \
             --changelog="$RELEASE_CHANGELOG"
       - name: Sign and verify production manifest
         shell: bash
         env:
           MYTEAM_UPDATER_PRIVATE_KEY: ${{ secrets.MYTEAM_UPDATER_PROD_PRIVATE_KEY }}
           EXPECTED_ANDROID_CERT: ${{ secrets.ANDROID_PROD_CERT_SHA256 }}
-          EXPECTED_WINDOWS_CERT: ${{ secrets.WINDOWS_AUTHENTICODE_CERT_SHA256 }}
         run: |
           set -euo pipefail
           test -n "$MYTEAM_UPDATER_PRIVATE_KEY"

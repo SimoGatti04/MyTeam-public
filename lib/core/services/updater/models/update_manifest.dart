@@ -1,4 +1,5 @@
 import 'dart:convert';
+
 import '../crypto_verifier.dart';
 
 /// Piattaforme supportate per gli aggiornamenti
@@ -27,7 +28,8 @@ class UpdateArtifact {
   final String url;
   final String sha256;
   final int sizeBytes;
-  final String? signature; // Firma crittografica facoltativa aggiuntiva per il file binario
+  final String?
+  signature; // Firma crittografica facoltativa aggiuntiva per il file binario
 
   UpdateArtifact({
     required this.url,
@@ -40,18 +42,30 @@ class UpdateArtifact {
     final rawUrl = json['url'] as String? ?? '';
     // Sicurezza: obbligo di validazione URL secondo criteri rigorosi (HTTPS, host consentiti)
     if (!CryptoVerifier.isAllowedArtifactUrl(rawUrl)) {
-      throw FormatException('L\'URL dell\'artefatto non rispetta i vincoli di sicurezza: $rawUrl');
+      throw FormatException(
+        'L\'URL dell\'artefatto non rispetta i vincoli di sicurezza: $rawUrl',
+      );
     }
 
-    final rawSha = json['sha256'] as String? ?? '';
-    if (rawSha.trim().length != 64) {
-      throw FormatException('SHA-256 dell\'artefatto non valido o mancante: $rawSha');
+    final rawSha = json['sha256'];
+    if (rawSha is! String ||
+        !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(rawSha.trim())) {
+      throw const FormatException(
+        'SHA-256 dell\'artefatto non valido o mancante.',
+      );
+    }
+
+    final sizeBytes = json['size_bytes'];
+    if (sizeBytes is! int || sizeBytes <= 0) {
+      throw const FormatException(
+        'Dimensione dell\'artefatto non valida o mancante.',
+      );
     }
 
     return UpdateArtifact(
       url: rawUrl,
       sha256: rawSha.trim().toLowerCase(),
-      sizeBytes: (json['size_bytes'] as num?)?.toInt() ?? 0,
+      sizeBytes: sizeBytes,
       signature: json['signature'] as String?,
     );
   }
@@ -74,7 +88,8 @@ class UpdateManifest {
   final String changelog;
   final bool mandatory;
   final int minSupportedVersionCode;
-  final String? manifestSignature; // Firma detached Ed25519 (se incorporata o letta da header/.sig)
+  final String?
+  manifestSignature; // Firma detached Ed25519 (se incorporata o letta da header/.sig)
   final Map<String, UpdateArtifact> platforms;
 
   UpdateManifest({
@@ -88,7 +103,10 @@ class UpdateManifest {
     required this.platforms,
   });
 
-  factory UpdateManifest.fromJson(Map<String, dynamic> json, {String? detachedSignature}) {
+  factory UpdateManifest.fromJson(
+    Map<String, dynamic> json, {
+    String? detachedSignature,
+  }) {
     final rawPlatforms = json['platforms'] as Map<String, dynamic>? ?? {};
     final platformsMap = <String, UpdateArtifact>{};
     rawPlatforms.forEach((key, value) {
@@ -97,20 +115,31 @@ class UpdateManifest {
       }
     });
 
+    final versionCode = json['version_code'];
+    if (versionCode is! int || versionCode <= 0) {
+      throw const FormatException(
+        'Codice versione del manifest non valido o mancante.',
+      );
+    }
+
     return UpdateManifest(
       versionName: json['version_name'] as String? ?? '',
-      versionCode: (json['version_code'] as num?)?.toInt() ?? 0,
+      versionCode: versionCode,
       releaseDate: json['release_date'] as String? ?? '',
       changelog: json['changelog'] as String? ?? '',
       mandatory: json['mandatory'] as bool? ?? false,
-      minSupportedVersionCode: (json['min_supported_version_code'] as num?)?.toInt() ?? 1,
+      minSupportedVersionCode:
+          (json['min_supported_version_code'] as num?)?.toInt() ?? 1,
       manifestSignature: detachedSignature ?? (json['signature'] as String?),
       platforms: platformsMap,
     );
   }
 
   static UpdateManifest fromRawJson(String str, {String? detachedSignature}) =>
-      UpdateManifest.fromJson(json.decode(str) as Map<String, dynamic>, detachedSignature: detachedSignature);
+      UpdateManifest.fromJson(
+        json.decode(str) as Map<String, dynamic>,
+        detachedSignature: detachedSignature,
+      );
 
   UpdateArtifact? getArtifactForPlatform(String platformName) {
     return platforms[platformName.toLowerCase()];

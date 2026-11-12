@@ -5,6 +5,7 @@ import 'package:convert/convert.dart';
 import 'package:ed25519_edwards/ed25519_edwards.dart' as ed;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:myteam/core/services/updater/crypto_verifier.dart';
+
 import '../../tool/release_candidate.dart';
 
 void main() {
@@ -21,6 +22,48 @@ void main() {
   tearDown(() async {
     if (await temp.exists()) await temp.delete(recursive: true);
   });
+
+  test(
+    'prepare records unsigned Windows and deferred review honestly',
+    () async {
+      final android = await File(
+        '${temp.path}/input.apk',
+      ).writeAsBytes([1, 2, 3]);
+      final windows = await File(
+        '${temp.path}/input.exe',
+      ).writeAsBytes([4, 5, 6]);
+      final out = Directory('${temp.path}/prepared');
+      await prepareCandidate({
+        'out': out.path,
+        'version-name': '1.2.3',
+        'version-code': '42',
+        'previous-version-code': '41',
+        'android-apk': android.path,
+        'windows-installer': windows.path,
+        'commit': 'a' * 40,
+        'workflow-run-id': '123456789',
+        'android-cert-sha256': 'b' * 64,
+        'windows-authenticode-status': 'unsigned_owner_accepted',
+        'changelog': 'synthetic test only',
+      });
+      final provenance =
+          jsonDecode(
+                await File('${out.path}/build-provenance.json').readAsString(),
+              )
+              as Map<String, dynamic>;
+      expect(provenance['schema_version'], 2);
+      expect(
+        provenance['windows_authenticode_status'],
+        'unsigned_owner_accepted',
+      );
+      expect(
+        provenance['native_license_compliance_status'],
+        'deferred_not_assessed',
+      );
+      expect(provenance.containsKey('windows_authenticode_sha256'), isFalse);
+      expect(provenance.containsKey('windows_authenticode_verified'), isFalse);
+    },
+  );
 
   test(
     'accepts a fully signed, checksummed two-platform candidate idempotently',
@@ -199,6 +242,50 @@ void main() {
     },
   );
 
+  test('rejects a false Windows Authenticode certification claim', () async {
+    final candidate = await _makeCandidate(temp, keyPair);
+    final file = File('${candidate.path}/build-provenance.json');
+    final provenance =
+        jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+    provenance['windows_authenticode_verified'] = true;
+    await file.writeAsString(
+      '${const JsonEncoder.withIndent('  ').convert(provenance)}\n',
+    );
+    await _rewriteSums(candidate);
+    await expectLater(
+      validateCandidate(candidate, publicKeyHex: publicKeyHex),
+      throwsA(
+        isA<FormatException>().having(
+          (error) => error.message,
+          'message',
+          contains('provenance'),
+        ),
+      ),
+    );
+  });
+
+  test('rejects a false native license compliance attestation', () async {
+    final candidate = await _makeCandidate(temp, keyPair);
+    final file = File('${candidate.path}/build-provenance.json');
+    final provenance =
+        jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+    provenance['native_license_compliance_status'] = 'compliant';
+    await file.writeAsString(
+      '${const JsonEncoder.withIndent('  ').convert(provenance)}\n',
+    );
+    await _rewriteSums(candidate);
+    await expectLater(
+      validateCandidate(candidate, publicKeyHex: publicKeyHex),
+      throwsA(
+        isA<FormatException>().having(
+          (error) => error.message,
+          'message',
+          contains('provenance'),
+        ),
+      ),
+    );
+  });
+
   test('rejects provenance for a different Android package identity', () async {
     final candidate = await _makeCandidate(temp, keyPair);
     final file = File('${candidate.path}/build-provenance.json');
@@ -262,7 +349,7 @@ Future<Directory> _makeCandidate(Directory parent, ed.KeyPair pair) async {
     '${dir.path}/version.json.sig',
   ).writeAsString(hex.encode(ed.sign(pair.privateKey, manifestBytes)));
   final provenance = <String, Object>{
-    'schema_version': 1,
+    'schema_version': 2,
     'channel': 'production',
     'version_name': version,
     'version_code': code,
@@ -275,8 +362,8 @@ Future<Directory> _makeCandidate(Directory parent, ed.KeyPair pair) async {
     'android_application_id': 'it.simogatti.myteam',
     'android_certificate_sha256': 'b' * 64,
     'android_certificate_verified': true,
-    'windows_authenticode_sha256': 'c' * 64,
-    'windows_authenticode_verified': true,
+    'windows_authenticode_status': 'unsigned_owner_accepted',
+    'native_license_compliance_status': 'deferred_not_assessed',
     'built_at_utc': '2026-11-10T12:00:00.000Z',
     'artifacts': {
       apkName: {

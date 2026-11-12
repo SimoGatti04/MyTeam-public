@@ -20,6 +20,25 @@ const _manifestKeys = {
   'min_supported_version_code',
   'platforms',
 };
+const _provenanceKeys = {
+  'schema_version',
+  'channel',
+  'version_name',
+  'version_code',
+  'previous_production_version_code',
+  'git_commit',
+  'workflow_run_id',
+  'flutter_version',
+  'jdk_major',
+  'inno_setup_version',
+  'android_application_id',
+  'android_certificate_sha256',
+  'android_certificate_verified',
+  'windows_authenticode_status',
+  'native_license_compliance_status',
+  'built_at_utc',
+  'artifacts',
+};
 final _sha256Pattern = RegExp(r'^[0-9a-f]{64}$');
 final _versionPattern = RegExp(r'^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$');
 final _commitPattern = RegExp(r'^(?:[0-9a-f]{40}|[0-9a-f]{64})$');
@@ -35,7 +54,7 @@ Future<void> main(List<String> args) async {
     }
     switch (args.first) {
       case 'prepare':
-        await _prepare(_parseOptions(args.skip(1)));
+        await prepareCandidate(_parseOptions(args.skip(1)));
         return;
       case 'verify-archive':
         if (args.length != 3) {
@@ -76,7 +95,7 @@ Prepare after both signed installers are built:
     --out DIR --version-name X.Y.Z --version-code N \\
     --android-apk FILE --windows-installer FILE --commit SHA \\
     --workflow-run-id ID --android-cert-sha256 HEX \\
-    --windows-authenticode-sha256 HEX --changelog TEXT
+    --windows-authenticode-status unsigned_owner_accepted --changelog TEXT
 
 Then sign the exact version.json bytes using the externally held pinned key:
   dart run tool/sign_manifest.dart sign DIR/version.json
@@ -111,7 +130,7 @@ String _required(Map<String, String> values, String key) {
   return value;
 }
 
-Future<void> _prepare(Map<String, String> values) async {
+Future<void> prepareCandidate(Map<String, String> values) async {
   const expected = {
     'out',
     'version-name',
@@ -121,7 +140,7 @@ Future<void> _prepare(Map<String, String> values) async {
     'commit',
     'workflow-run-id',
     'android-cert-sha256',
-    'windows-authenticode-sha256',
+    'windows-authenticode-status',
     'previous-version-code',
     'changelog',
   };
@@ -138,10 +157,12 @@ Future<void> _prepare(Map<String, String> values) async {
     _required(values, 'android-cert-sha256'),
     'Android certificate',
   );
-  final windowsFingerprint = _fingerprint(
-    _required(values, 'windows-authenticode-sha256'),
-    'Windows Authenticode certificate',
-  );
+  if (_required(values, 'windows-authenticode-status') !=
+      'unsigned_owner_accepted') {
+    throw const FormatException(
+      'Windows Authenticode status must record the owner-approved unsigned build.',
+    );
+  }
   if (!_versionPattern.hasMatch(version)) {
     throw const FormatException('Version must be numeric X.Y.Z.');
   }
@@ -204,7 +225,7 @@ Future<void> _prepare(Map<String, String> values) async {
     },
   };
   final provenance = <String, Object>{
-    'schema_version': 1,
+    'schema_version': 2,
     'channel': 'production',
     'version_name': version,
     'version_code': code,
@@ -217,8 +238,8 @@ Future<void> _prepare(Map<String, String> values) async {
     'android_application_id': _androidApplicationId,
     'android_certificate_sha256': androidFingerprint,
     'android_certificate_verified': true,
-    'windows_authenticode_sha256': windowsFingerprint,
-    'windows_authenticode_verified': true,
+    'windows_authenticode_status': 'unsigned_owner_accepted',
+    'native_license_compliance_status': 'deferred_not_assessed',
     'built_at_utc': now.toIso8601String(),
     'artifacts': {
       androidName: {
@@ -373,7 +394,10 @@ Future<void> validateCandidate(
 
   final provenance = jsonDecode(await provenanceFile.readAsString());
   if (provenance is! Map<String, dynamic> ||
-      provenance['schema_version'] != 1 ||
+      provenance.keys.toSet().difference(_provenanceKeys).isNotEmpty ||
+      !_provenanceKeys.containsAll(provenance.keys) ||
+      provenance.keys.length != _provenanceKeys.length ||
+      provenance['schema_version'] != 2 ||
       provenance['channel'] != 'production' ||
       provenance['version_name'] != version ||
       provenance['version_code'] != code ||
@@ -385,19 +409,18 @@ Future<void> validateCandidate(
       provenance['jdk_major'] != _jdkMajor ||
       provenance['inno_setup_version'] != _innoSetupVersion ||
       provenance['android_certificate_verified'] != true ||
-      provenance['windows_authenticode_verified'] != true ||
+      provenance['windows_authenticode_status'] != 'unsigned_owner_accepted' ||
+      provenance['native_license_compliance_status'] !=
+          'deferred_not_assessed' ||
       !_commitPattern.hasMatch(provenance['git_commit'] as String? ?? '') ||
       !RegExp(
         r'^\d+$',
       ).hasMatch(provenance['workflow_run_id'] as String? ?? '') ||
       !_sha256Pattern.hasMatch(
         provenance['android_certificate_sha256'] as String? ?? '',
-      ) ||
-      !_sha256Pattern.hasMatch(
-        provenance['windows_authenticode_sha256'] as String? ?? '',
       )) {
     throw const FormatException(
-      'Build provenance is incomplete, mismatched, or does not certify both platform signers.',
+      'Build provenance is incomplete, mismatched, or misstates the Android signer or release review status.',
     );
   }
   final provenanceArtifacts = provenance['artifacts'];
