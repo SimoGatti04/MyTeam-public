@@ -25,12 +25,12 @@
 - Build once. Promote the identical APK, EXE, manifest, signature, and provenance bytes that passed validation and A′→B′ tests. Never rebuild between certification and promotion.
 
 - **Interface validation gate:** before any future dispatch, verify that the candidate builder’s CLI and provenance schema match the service-side validator. If the producer and validator disagree, keep the release on HOLD and reconcile their interfaces. Source-level checks do not establish signing or live publication.
-- CI artifacts (currently configured for 90-day retention) are transfer/staging only, not durable archival. Durable archive and independently restorable backup are mandatory before GO.
-- Release preparation is manual. Pushes and ordinary CI must never publish. Candidate build, archive, preproduction test, and production publication are separate gates. The workflow in this branch builds/signs and uploads a candidate only; it does not deploy or publish the feed.
+- Candidate APK/EXE and Actions artifacts may be publicly visible by owner decision; public visibility is not a release blocker. Actions artifacts have 90-day retention and are not durable archival. Preserve exact candidate bytes and checksums for testing and promotion; do not rebuild after certification.
+- Release preparation is manual. Pushes and ordinary CI must never publish the production feed. Candidate build, archive, preproduction test, and production publication are separate gates. The workflow builds/signs and uploads candidate artifacts only; it does not deploy or publish the feed.
 
 ## Fixed lifecycle and gates
 
-Record each phase as `PASS`, `HOLD`, or `NOT RUN`, with evidence paths/URLs and SHA-256 values, in a release record named `docs/APP/releases/<version>-<versionCode>.md` (or the private release archive if the record contains operationally sensitive metadata). Never put secrets or private key material in that record. Keep a copy of the final record with the archive. If a gate fails, stop at that phase; do not skip ahead.
+Record each phase as `PASS`, `HOLD`, or `NOT RUN`, with evidence paths/URLs and SHA-256 values, in a release record named `docs/APP/releases/<version>-<versionCode>.md` (or in an owner-selected record location if it contains operationally sensitive metadata). Never put secrets or private key material in that record. Keep a copy of the final record with the archive. If a gate fails, stop at that phase; do not skip ahead.
 
 ### 0 — Identity and custody bootstrap — HOLD until verified
 
@@ -62,14 +62,14 @@ This is a one-time bootstrap recipe, not a claim that a key exists. Independentl
 
 - Freeze a reviewed commit on the protected `release/rc-myteam-first-user` branch. Record full 40-character commit SHA, repository, branch, review/approval evidence, and clean-tree status. Do not include unreviewed PR code or secrets-bearing workflow changes.
 - Pin Flutter `3.38.1` (`.fvmrc`), Ubuntu runner `ubuntu-24.04`, Java 17, Windows runner `windows-2022`, Android build-tools `35.0.0`, and Inno Setup compiler `6.7.1`; retain `pubspec.lock` and enforce it (`flutter pub get --enforce-lockfile`). Record runner image identifiers and resolved tool versions from the actual run.
-- Choose numeric `X.Y.Z` and a positive Android `versionCode` strictly greater than the last production code; record both and prior code. The same `version_name`/code identifies the Windows installer. Check both Android production `applicationId` and Inno AppId before building. No version reuse after any candidate bytes have escaped the private build environment.
+- Choose numeric `X.Y.Z` and a positive Android `versionCode` strictly greater than the last production code; record both and prior code. The same `version_name`/code identifies the Windows installer. Check both Android production `applicationId` and Inno AppId before building. No version reuse after candidate bytes have been generated or distributed; public candidate artifacts are acceptable by owner decision.
 - Review the release workflow and signing guards at the exact frozen SHA. Confirm required secrets are available by **name/presence only**, never display values. Record environment/branch restriction outcome and approver policy. Do not dispatch if branch protection/environment gating is not effective.
 
 ### 2 — Build and sign once (candidate only)
 
 The only currently implemented build entrypoint is `.github/workflows/release-candidate.yml` with manual `workflow_dispatch`. A credential-free preflight fails unless the dispatch ref is exactly `release/rc-myteam-first-user`, GitHub reports it protected, the full expected SHA equals the dispatched SHA, numeric/version-code inputs are valid, and the operator explicitly acknowledges the unsigned-Windows warning risk. Android, Windows, and bundle jobs depend on that successful gate; they do not silently skip when protection is absent. The workflow pins its Actions dependencies to full upstream commit SHAs and installs Android build-tools `35.0.0` through the runner SDK manager. It pins Linux jobs to `ubuntu-24.04`, then checks the immutable commit, lockfile, Android ID/certificate fingerprint, intentional unsigned Windows state, Inno engine version, monotonic version, and production manifest signature. Provenance marks native license/compliance review `deferred_not_assessed`; no compliance scan or attestation is performed. Output remains Actions artifacts with 90-day retention; the workflow does not publish a feed or create a durable release archive, and source checks do not prove live repository/environment protection settings.
 
-**Dispatch bootstrap gate:** GitHub requires a `workflow_dispatch` workflow file to exist on the repository default branch before the first manual trigger; the dispatched run can then target the protected release branch. Before first use, verify that the candidate workflow is present on the default branch and that the release ref is protected. Do not rely on stale local tracking refs.
+**Dispatch bootstrap gate:** GitHub requires a `workflow_dispatch` workflow file to exist on the repository default branch before the first manual trigger; the dispatched run can then target the protected release branch. Read-only source verification on 2026-11-12 confirmed the workflow file on `main` and `release/rc-myteam-first-user`, both at `6448cd375df2cf63f100e14d591b1638b874944a`. Branch protection, `production-release` Environment reviewers/ref restrictions, and configured secret-name presence remain **NOT VERIFIED**; verify those controls in authenticated repository Settings before dispatch. Do not rely on stale local tracking refs or infer live controls from this source snapshot.
 
 Before use, an owner/operator must verify in GitHub repository Settings:
 
@@ -85,18 +85,19 @@ Before any future candidate dispatch, the owner/operator must verify the protect
 
 ```sh
 gh workflow run release-candidate.yml \
-  --repo SimoGatti04/MyTeam \
+  --repo SimoGatti04/MyTeam-public \
   --ref release/rc-myteam-first-user \
   -f expected_commit_sha='<FULL_FROZEN_SHA>' \
   -f version_name='<X.Y.Z>' \
   -f version_code='<MONOTONIC_INTEGER>' \
   -f previous_production_version_code='<LAST_PRODUCTION_CODE_OR_0>' \
+  -f acknowledge_unsigned_windows=true \
   -f changelog='<REVIEWED_USER_FACING_NOTES>'
 ```
 
 The workflow and release CLI intentionally have no artifact-URL override. The CLI is plain Dart and shares the Flutter-independent Ed25519 verifier; production CLI validation always uses the pinned production public key. The test-only Dart API-key seam is not a CLI option. Before a future release, verify this producer contract against the service-side validator; source-level tests are not evidence of a live publication.
 
-No private value is a workflow input. Capture workflow run ID/URL, terminal conclusion, checked-out commit, toolchain, artifact IDs and hashes. A failed/unknown run is not a candidate; inspect it before any retry to prevent duplicates. Download only the named output from the exact successful run into a new private staging directory. Validate it before proceeding.
+No private value is a workflow input. Capture workflow run ID/URL, terminal conclusion, checked-out commit, toolchain, artifact IDs and hashes. A failed/unknown run is not a candidate; inspect it before any retry to prevent duplicates. Download only the named output from the exact successful run into a new isolated staging directory. Validate it before proceeding.
 
 ### 3 — Candidate validation and provenance
 
@@ -117,36 +118,31 @@ The verifier checks exact production channel and Android/Windows entries, manife
 
 The successful Actions run is temporary. Before A′→B′ testing or GO:
 
-1. Store the exact verified bundle archive, archive `.sha256`, individual `SHA256SUMS`, signed manifest, signature, provenance, workflow-run metadata, and release evidence in an owner-approved, access-controlled draft archive location, tagged with the candidate version and commit. Use a unique candidate tag such as `candidate-v<X.Y.Z>-build<N>`; create the tag at the frozen commit, never at an implicit default-branch tip. Example (only after owner authorizes archive creation):
+1. Preserve the exact verified bundle archive, archive `.sha256`, individual `SHA256SUMS`, signed manifest, signature, provenance, workflow-run metadata, and release evidence under a unique candidate label such as `candidate-v<X.Y.Z>-build<N>` bound to the frozen commit. Actions artifacts may be used for candidate transfer; their configured 90-day retention is temporary, so keep a durable owner-approved copy before GO. Public visibility is accepted by owner decision, but a candidate artifact is not the production feed and does not authorize feed publication. Restore the retained copy into a fresh directory and verify the archive checksum before using it.
+2. Keep a second durable copy with an independent failure domain if required by the owner archive plan. Candidate artifacts need not be encrypted for secrecy; the signing keys remain separately protected. Verify checksums after each copy.
 
-   ```sh
-   gh release create "candidate-v$VERSION-build$CODE" \
-     "$BUNDLE" "$BUNDLE.sha256" "$RELEASE_RECORD" \
-     --repo SimoGatti04/MyTeam --target "$FROZEN_SHA" --draft \
-     --title "MyTeam $VERSION build $CODE candidate" \
-     --notes-file "$RELEASE_NOTES"
-   ```
 
-   Do not make the repository or release public. A draft/private archive is not the production feed and does not authorize distribution. Read back the release metadata and asset names, download each asset to a fresh directory, and verify the archive checksum before using it.
-2. Copy the same bytes to a second owner-controlled encrypted backup location with independent failure domain. No replacement/overwrite; use a new versioned path. Record storage reference and checksums, not access tokens. Example after approved destination paths exist:
-
-   ```sh
-   install -d -m 700 "$BACKUP_A/myteam/$TAG" "$BACKUP_B/myteam/$TAG"
-   cp -n "$BUNDLE" "$BUNDLE.sha256" "$RELEASE_RECORD" "$BACKUP_A/myteam/$TAG/"
-   cp -n "$BUNDLE" "$BUNDLE.sha256" "$RELEASE_RECORD" "$BACKUP_B/myteam/$TAG/"
-   (cd "$BACKUP_A/myteam/$TAG" && shasum -a 256 -c "$(basename "$BUNDLE.sha256")")
-   (cd "$BACKUP_B/myteam/$TAG" && shasum -a 256 -c "$(basename "$BUNDLE.sha256")")
-   ```
 3. From the secondary copy, restore into a clean isolated directory and rerun `verify-archive`, `validate`, and checksum checks; record evidence. Failure or unavailable independent backup = `HOLD`.
 4. After test/promotion, preserve archive immutably; never replace an asset under a reused version/tag. Superseding a candidate uses a new monotonically increasing version code and a new archive.
 
-Actions artifacts with configured retention are not a durable release archive. Keep the candidate archive access-controlled; changing its audience or publishing artifacts requires a separate explicit owner GO. Archive uploads and backups are outside this preparation task.
+Actions artifacts are not a durable release archive. Retain exact candidate bytes and checksums in an owner-approved durable location; public visibility is acceptable by owner decision. Do not publish the production feed or distribute a release to users without the separate exact-version GO.
 
-### 5 — Preproduction A′→B′ test — currently a hard blocker
+### 5 — Candidate preparation and owner-run A′→B′ test — HOLD until staging is confirmed
 
-Test on disposable Android emulator and Windows VM with test data, no user devices. Install **A′** normally; record app ID/AppId, version, Android certificate fingerprint, and pre-test local-data sentinel. Publish only to an isolated preproduction feed. Trigger the update in the app; do not use `adb install` or rerun the installer to install B′. Verify downloader signature/hash/size, install handoff, no manual close, upgrade without data loss, installed version B′ and Android signing identity unchanged; retain redacted evidence. Also prove unavailable-feed handling, malformed JSON, wrong channel, bad signature, wrong hash/size, rollback version, and unexpected redirects fail closed. Repeat Windows A′→B′, verify Restart Manager/graceful close without force-kill, and record the expected unsigned-installer warning risk; no Authenticode claim is made.
+**Tentative version proposal only:** the source baseline is `0.2.0+2`, and no production installs are recorded. Subject to owner confirmation that there has been no prior production release, use A′=`0.2.1+3` and B′=`0.2.2+4`. This proposal is not a version assignment or GO. The owner must select the exact version names/codes and changelog before dispatch.
 
-**Current blocker:** `UpdaterChannelConfig` fixes production clients to `https://myteam.simogatti.it/updates/version.json`; no isolated production-identity staging feed selector/route was found in this branch. QA's app ID, QA signer, QA manifest key, and QA feed are not substitutes. A staging-specific client build that is not byte-identical to the promotable production build also does not satisfy build-once promotion. Before the first production release, CLIENT and INFRA must document and test an isolated staging mechanism that exercises the actual production app identity, Android/Windows signers, pinned Ed25519 trust, and updater handoff without writing to the live production manifest. Until then this gate is `HOLD`; do not improvise a live-feed test.
+The workflow builds one version per run. For A′ and B′, run it twice from the same approved frozen commit SHA and protected release branch, with the same production Android JKS/certificate and the same private Ed25519 key matching the pinned public key. Use prior-production code `0` only while no version has been released; B′ advances from A′ by version code, while the workflow input remains the last promoted production code. Keep each run ID distinct and download the final `myteam-production-release-candidate` archive and checksum from the exact successful run. Validate each archive and preserve the exact B′ APK/EXE/manifest/signature bytes for promotion; do not rebuild B′ after testing.
+
+**Owner manual device checklist (agents do not run emulator/VM upgrades):**
+
+1. Have INFRA confirm a controlled, isolated staging route that serves the production client’s fixed HTTPS host/path to disposable devices, with valid TLS, while leaving the live production feed and publication pointer unchanged. The candidate manifest and signature must remain byte-for-byte unchanged. If this cannot be confirmed, stop; do not test against the live feed or substitute QA identity/feed/key.
+2. On a disposable Android emulator, install only A′ normally; record app ID `it.simogatti.myteam`, A′ version/code, production signing certificate fingerprint, and a harmless app-data sentinel. Point the emulator’s test network to the controlled staging route. Trigger update inside A′ so it downloads and installs the exact B′ APK from its candidate bundle—do not install B′ with `adb install`. Confirm B′ version/code, same package and certificate, retained sentinel, verified signature/hash/size, and no unexpected redirect.
+3. On a disposable Windows VM, install only A′ normally; record version, Inno AppId, and an app-data sentinel. Use the same isolated staging route and trigger the in-app updater. Confirm B′ installs without manual app closure/force-termination, data remains, the candidate EXE is the exact B′ bundle file, AppId/version are correct, and Windows reports the expected `NotSigned` status/SmartScreen warning risk.
+4. Record OS/device, exact A′/B′ artifact SHA-256, workflow run IDs, staging-route method (no credentials), results, and any redacted logs. Also test unavailable feed, malformed manifest, wrong channel, invalid signature, wrong hash/size, rollback version, and unexpected redirects. Any failure is HOLD. No result authorizes production feed publication; owner retains the separate exact-version GO.
+
+The owner performs this device/VM test manually using the checklist above; no emulator/VM result is claimed here. The staging route must preserve the signed candidate manifest bytes and must not mutate the live feed.
+
+**Staging gate:** `UpdaterChannelConfig` fixes production clients to `https://myteam.simogatti.it/updates/version.json`; this branch does not establish an isolated route. Before owner testing, INFRA must confirm a controlled staging method that exercises the actual production app identity, Android/Windows signers, pinned Ed25519 trust, and updater handoff without changing the live feed. QA app identity, signer, key, or feed is not a substitute. A staging-specific client rebuild also fails build-once promotion. Until the route is confirmed, this gate is `HOLD`; do not test against the live feed.
 
 ### 6 — Explicit GO and publication plan
 
@@ -171,7 +167,22 @@ From outside the cluster, GET production `version.json`, `.sig`, Android APK and
 - Preserve the failed candidate and evidence; stop new deployments and new candidate dispatches until root cause is known. Restore the manifest pointer under Infra lock and verify externally.
 - Suspected Android keystore or Ed25519 private-key compromise: immediately stop release/feed writes, restrict access/revoke CI secret access, preserve audit evidence, contact the owner, and follow a separately approved client/server key-rotation plan. Android package signer cannot be silently replaced after distribution; Ed25519 rotation requires clients that trust the successor before signing with it. Never rotate/regenerate keys as a rollback shortcut.
 
-## Current gate ledger (as observed 2026-11-11)
+## First-release setup checklist — status from this source-only preparation
+
+| Check | Status | Evidence / owner action |
+|---|---|---|
+| Workflow is manual-only, checks the protected release ref and exact full source SHA before signing jobs, pins Actions by full SHA, and has no feed-publish step | PASS (source review) | `.github/workflows/release-candidate.yml`; no workflow was dispatched |
+| Android production package identity and Ed25519 pin/signature validation | PASS (source contract only) | `it.simogatti.myteam`; live signer custody/key match remains NOT VERIFIED |
+| Windows Authenticode | OWNER-ACCEPTED UNSIGNED | Inno installer check requires `NotSigned`; disclose SmartScreen warning |
+| Release branch protection and `production-release` Environment reviewers/ref restrictions | NOT VERIFIED | Read-only API protection request returned 403; `gh auth status` is unauthenticated. Owner must inspect Settings before any dispatch |
+| Required environment secret names/presence | NOT VERIFIED | No secret endpoint access; do not enter values in chat or expose values. Configure names from `RELEASE-BASELINE.md` only after environment controls pass |
+| Workflow builds / candidate artifacts / candidate validation | NOT RUN | No production-signed workflow dispatch or build in this task |
+| Owner Android emulator and Windows VM A′→B′ test | NOT RUN | Owner uses exact candidate artifacts and manual checklist above after INFRA confirms staging; no device test is claimed |
+| Exact version assignment, archive, production feed and owner GO | NOT RUN | Candidate version proposal is tentative; no binary/feed publication or production GO |
+
+Owner settings checklist: in `SimoGatti04/MyTeam-public` Settings, protect `release/rc-myteam-first-user` with the organization-approved review/status and no-force-push/no-delete rules; configure the `production-release` Environment to allow only that branch, require designated independent reviewers, prevent self-approval where supported, and add the required secret **names** there. Verify the resulting settings and that `github.ref_protected` is true before dispatch. Do not weaken protections to make a push or workflow pass. This checklist is not proof that settings are configured.
+
+## Current gate ledger (updated 2026-11-12)
 
 | Gate | Status | Evidence / blocker |
 |---|---|---|
@@ -181,14 +192,14 @@ From outside the cluster, GET production `version.json`, `.sig`, Android APK and
 | Native licensing/compliance review | DEFERRED — NOT ASSESSED | Known debt; no compliance statement or attestation |
 | Existing Ed25519 private key matching client pin and recoverable escrow | HOLD | Baseline says not recovered/verified; pin exists in source |
 | Workflow dispatch bootstrap on default branch | HOLD | Verify the workflow is available on the default branch and the selected release ref is protected before any manual dispatch |
-| Protected release branch / production Environment reviewers / private-plan support | NOT VERIFIED | local `gh auth status` reported invalid token; no Settings mutation or credential repair |
-| Immutable GitHub Action dependency pins | HOLD | workflow currently uses major-version tags (`@v4`, `@v3`, `@v2`); audited full-SHA pinning remains required |
+| Release branch protection / production Environment reviewers and branch restrictions / secret scopes | NOT VERIFIED | release branch ref exists at the reviewed source SHA; GitHub API returned 403 for protection details and local `gh auth status` is unauthenticated |
+| Immutable GitHub Action dependency pins | PASS (source review only) | release workflow actions are pinned to full commit SHAs; repository settings and upstream action behavior are not verified |
 | Production-signer isolated staging feed and true A′→B′ test | HOLD | client uses fixed production manifest URL; no matching Infra contract available at the given local path |
 | Candidate workflow/build/sign/archive | NOT RUN | only source/static inspection this task; workflow is manual, uploads 90-day artifacts |
-| Durable GitHub Release + second backup + restore drill | NOT RUN | no archive created or uploaded |
+| Durable candidate archive + independent backup + restore drill | NOT RUN | no candidate built or archive created |
 | Production Route/PVC/UID/ingress/publisher + external smoke | NOT RUN | no server access or deployment in this task |
 | Owner's exact-version production GO | NOT GIVEN | required separately after all gates pass |
 
 ## Release evidence record template
 
-Create one private record per candidate with: version/name/code/prior code; repository/ref/full commit; workflow run ID and conclusion; Flutter/JDK/runner/Inno versions; Android package ID and verified signer SHA-256; Windows AppId/version and `unsigned_owner_accepted` status (no Authenticode fingerprint); `native_license_compliance_status: deferred_not_assessed`; pinned Ed25519 key identifier (public hex only); `version.json` and `.sig` hashes; APK/EXE sizes and SHA-256; `SHA256SUMS`; archive hash and both backup references; A′→B′ Android/Windows device/OS results and data-retention sentinel; security negative-test results; GO record; Infra target/UTC/pointer hashes; external smoke statuses/headers; rollback readiness and final state (`candidate`, `archived`, `staged`, `published`, `rolled_back`). Every item not actually observed must say `NOT RUN` or `NOT VERIFIED`; do not claim native license/compliance clearance.
+Create one release record per candidate with: version/name/code/prior code; repository/ref/full commit; workflow run ID and conclusion; Flutter/JDK/runner/Inno versions; Android package ID and verified signer SHA-256; Windows AppId/version and `unsigned_owner_accepted` status (no Authenticode fingerprint); `native_license_compliance_status: deferred_not_assessed`; pinned Ed25519 key identifier (public hex only); `version.json` and `.sig` hashes; APK/EXE sizes and SHA-256; `SHA256SUMS`; archive hash and both backup references; A′→B′ Android/Windows device/OS results and data-retention sentinel; security negative-test results; GO record; Infra target/UTC/pointer hashes; external smoke statuses/headers; rollback readiness and final state (`candidate`, `archived`, `staged`, `published`, `rolled_back`). Every item not actually observed must say `NOT RUN` or `NOT VERIFIED`; do not claim native license/compliance clearance.
