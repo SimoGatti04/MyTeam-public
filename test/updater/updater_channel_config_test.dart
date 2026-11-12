@@ -13,6 +13,8 @@ import 'package:myteam/core/services/updater/update_service.dart';
 import 'package:myteam/core/services/updater/updater_channel_config.dart';
 
 void main() {
+  const productionPublicKey =
+      'b7cb644d4d633d2def2e557cdd13382cc6b431292425d4b9f3cab0ba12c139b9';
   const qaPublicKey =
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
       'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -27,6 +29,7 @@ void main() {
     expect(config.isValid, isTrue);
     expect(config.isQa, isFalse);
     expect(config.manifestUrl, '${AppConstants.baseUrl}/updates/version.json');
+    expect(config.publicKeyHex, productionPublicKey);
     expect(config.publicKeyHex, CryptoVerifier.defaultReleasePublicKeyHex);
   });
 
